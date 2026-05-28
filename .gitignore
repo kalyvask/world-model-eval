@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets / env
+.env
+
+# Data + artifacts (captured activations, rollouts, probes can be large)
+data/
+*.pt
+*.npz
+*.mp4
+*.gif
+
+# OS
+.DS_Store
+Thumbs.db
