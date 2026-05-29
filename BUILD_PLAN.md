@@ -63,6 +63,22 @@ richer world (Oasis-Minecraft) the paper didn't cover.
   need the equivalent (download a seed segment, or seed from a real ALE env —
   atari deps are needed anyway for `num_actions`).
 
+## Results (P1-P4 complete)
+
+- P1 ✅ DIAMOND Breakout loads headless on Modal (4.41M-param denoiser, L40S).
+- P2 ✅ seed (real ALE frames) + imagine-step + capture UNet acts (1,64,64,64).
+- P3 ✅ **ball position linearly decodable**: ridge probe on pooled UNet
+  activation, ball_x R²=0.89 / ball_y R²=0.76 (held-out). Driving imagination
+  with the agent's policy + FIRE burn-in was needed for dynamic rollouts;
+  frame-diff CV isolates the moving ball from static bricks.
+- P4 ✅ (characterized) **decode ≫ steer**: adding the probe / diff-of-means
+  direction moves the ball, but a matched-norm random direction moves it about
+  as much; weak sign-dependent control at moderate α, non-monotonic past it.
+  Clean linear steering of the world model is not established.
+- P5 / P6: optional given the P4 finding (a "steer the dream" cockpit is only
+  compelling if steering is clean; Oasis port would test if decode≫steer holds
+  on a richer model).
+
 ## Phased plan
 
 - **P1 — Load + step headless on Modal.** Clone DIAMOND in the image, install

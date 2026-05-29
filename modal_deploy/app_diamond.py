@@ -167,12 +167,16 @@ class DiamondWorldModel:
         # inner model once per denoising step; we keep the list and take the
         # last (lowest-sigma, most-resolved) activation per env.step.
         self._cap = []
+        self._steer = None  # (1,C,H,W) tensor added to the UNet output when set
         unet = self.agent.denoiser.inner_model.unet
 
         def cap_hook(module, inp, out):
             # UNet.forward returns a tuple (x, *_); keep the feature tensor x.
-            t = out[0] if isinstance(out, (tuple, list)) else out
-            self._cap.append(t.detach())
+            x = out[0] if isinstance(out, (tuple, list)) else out
+            self._cap.append(x.detach())
+            if self._steer is not None:
+                x = x + self._steer
+                return ((x,) + tuple(out[1:])) if isinstance(out, (tuple, list)) else x
             return out
 
         self._cap_handle = unet.register_forward_hook(cap_hook)
@@ -385,6 +389,118 @@ class DiamondWorldModel:
             "probes": results,
         }
 
+    @modal.method()
+    def steer_ball(self, n_probe: int = 300, n_eval: int = 48, alpha: float = 16.0):
+        """P4: does adding the ball_x probe direction MOVE the ball in the dream?
+
+        (1) probing rollout -> ridge probe -> full-res unit direction for ball_x
+        (back-projected through scaler+PCA, upsampled 16x16 -> 64x64);
+        (2) replay one fixed action sequence + fixed seed at several steering
+        magnitudes (0, +/-alpha, +/-2alpha) plus a matched-norm random-direction
+        control; report the mean ball_x at each. A monotonic shift with alpha
+        (and a flat random control) = the direction causally moves the ball.
+        """
+        import numpy as np
+        import torch
+        import torch.nn.functional as F
+        from sklearn.decomposition import PCA
+        from sklearn.linear_model import Ridge
+        from sklearn.preprocessing import StandardScaler
+
+        pool = 16
+        ac = self.agent.actor_critic
+        dev = self.device
+
+        def reset_obs():
+            r = self.wm_env.reset()
+            return r[0] if isinstance(r, (tuple, list)) else r
+
+        # ---- (1) probing rollout -> difference-of-means direction ----
+        # Capture FULL-res (C,H,W) activations + ball_x; the steering direction
+        # is mean(act | ball far right) - mean(act | ball far left). This keeps
+        # the localized spatial structure (where the ball is in the activation),
+        # unlike a pooled ridge decode-direction.
+        torch.manual_seed(0)
+        hx = torch.zeros(1, ac.lstm.hidden_size, device=dev)
+        cx = torch.zeros_like(hx)
+        obs = reset_obs()
+        prev = None
+        acts, yb = [], []
+        for i in range(n_probe):
+            with torch.no_grad():
+                o = ac.predict_act_value(obs, (hx, cx))
+            hx, cx = o.hx_cx
+            a = (torch.tensor([1], device=dev) if i < 8
+                 else torch.distributions.Categorical(logits=o.logits_act).sample()).long()
+            self._cap.clear(); self._steer = None
+            obs = self.wm_env.step(a)[0]
+            if not self._cap:
+                continue
+            acts.append(self._cap[-1].float().squeeze(0).half().cpu())  # (C,H,W) f16
+            fr = obs.detach().float().squeeze(0).cpu().numpy()
+            bxc, _, _ = _detect_ball_paddle(fr, prev); prev = fr
+            yb.append(bxc if bxc is not None else np.nan)
+        yb = np.array(yb)
+        idx = np.where(~np.isnan(yb))[0]
+        order = idx[np.argsort(yb[idx])]              # ascending ball_x
+        k = max(10, len(order) // 3)                   # terciles
+        low_idx, high_idx = order[:k], order[-k:]
+        mean_low = torch.stack([acts[j] for j in low_idx]).float().mean(0)    # (C,H,W)
+        mean_high = torch.stack([acts[j] for j in high_idx]).float().mean(0)
+        d = (mean_high - mean_low).unsqueeze(0).to(dev)                        # (1,C,H,W)
+        d = d / (d.norm() + 1e-8)                                              # unit norm
+        act_norm = float(acts[-1].float().norm())
+        x_low = float(np.mean(yb[low_idx])); x_high = float(np.mean(yb[high_idx]))
+
+        # ---- (2) one fixed action sequence + seed, swept over steering ----
+        def run(actions, steer):
+            torch.manual_seed(123)
+            hxr = torch.zeros(1, ac.lstm.hidden_size, device=dev); cxr = torch.zeros_like(hxr)
+            obs = reset_obs(); prev = None; bxs = []; rec = []
+            self._steer = steer
+            for i in range(n_eval):
+                if actions is None:
+                    with torch.no_grad():
+                        o = ac.predict_act_value(obs, (hxr, cxr))
+                    hxr, cxr = o.hx_cx
+                    a = (torch.tensor([1], device=dev) if i < 8
+                         else torch.distributions.Categorical(logits=o.logits_act).sample()).long()
+                    rec.append(int(a.item()))
+                else:
+                    a = torch.tensor([actions[i]], dtype=torch.long, device=dev)
+                self._cap.clear()
+                obs = self.wm_env.step(a)[0]
+                fr = obs.detach().float().squeeze(0).cpu().numpy()
+                bxc, _, _ = _detect_ball_paddle(fr, prev); prev = fr
+                bxs.append(bxc)
+            self._steer = None
+            vals = [v for v in bxs if v is not None]
+            return (float(np.mean(vals)) if vals else None, len(vals), rec)
+
+        _, _, actions = run(None, None)  # record a fixed action sequence
+        rows = []
+        for mult in [0.0, 1.0, -1.0, 2.0, -2.0]:
+            steer = None if mult == 0 else (mult * alpha) * d
+            mbx, ndet, _ = run(actions, steer)
+            rows.append({"alpha": round(mult * alpha, 1), "mean_ball_x": round(mbx, 2) if mbx is not None else None, "n_detected": ndet})
+        base = next((r["mean_ball_x"] for r in rows if r["alpha"] == 0.0), None)
+        for r in rows:
+            r["delta_vs_base"] = (round(r["mean_ball_x"] - base, 2) if (r["mean_ball_x"] is not None and base is not None) else None)
+        # matched-norm random-direction control at +alpha
+        torch.manual_seed(7)
+        rnd = torch.randn_like(d); rnd = rnd / (rnd.norm() + 1e-8)
+        rmbx, rnd_n, _ = run(actions, alpha * rnd)
+        return {
+            "game": GAME, "concept": "ball_x", "n_probe": n_probe, "n_eval": n_eval,
+            "dir_method": "difference_of_means_full_res",
+            "dom_contrast_ball_x_low_high": [round(x_low, 1), round(x_high, 1)],
+            "act_norm": round(act_norm, 1), "steer_dir_norm": "unit",
+            "baseline_mean_ball_x": base,
+            "steer_curve": rows,
+            "random_dir_control": {"alpha": alpha, "mean_ball_x": round(rmbx, 2) if rmbx is not None else None,
+                                   "delta_vs_base": round(rmbx - base, 2) if (rmbx is not None and base is not None) else None},
+        }
+
 
 @app.local_entrypoint()
 def introspect():
@@ -410,4 +526,13 @@ def probe(n_frames: int = 400, pool: int = 16):
 
     wm = DiamondWorldModel()
     info = wm.probe.remote(n_frames=n_frames, pool=pool)
+    print(json.dumps(info, indent=2))
+
+
+@app.local_entrypoint()
+def steer_ball(n_probe: int = 300, n_eval: int = 48, alpha: float = 16.0):
+    import json
+
+    wm = DiamondWorldModel()
+    info = wm.steer_ball.remote(n_probe=n_probe, n_eval=n_eval, alpha=alpha)
     print(json.dumps(info, indent=2))
