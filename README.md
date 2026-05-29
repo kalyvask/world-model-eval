@@ -84,13 +84,18 @@ ball by ~16–20 steps (above) and imagined reward saturates by ~step 50, so a g
 policy's real edge — sustained play over hundreds of steps — accrues *past* the
 fidelity cliff, where the dream can't see it.
 
-**Scope of this claim.** This sums the reward model's *raw* per-step reward over
-a fixed horizon — the naive way to use a world model as an evaluator. It does
-**not** use a value function to credit reward beyond the horizon the way
-DreamerV3 does, so the honest statement is that *raw imagined return* fails to
-rank these policies, not that no world-model signal can. `run_eval_value` tests a
-value-bootstrapped variant directly (raw, discounted, value-bootstrapped, and
-mean-critic-value signals vs real return).
+**Scope of this claim — tested.** Raw imagined return is the naive evaluator;
+DreamerV3 instead credits reward beyond a short horizon with a value function.
+`run_eval_value` tests exactly that, scoring four signals against real return
+using DIAMOND's own critic: raw return, discounted return, a value-bootstrapped
+return (discounted reward + γ^H·V(s_H)), and the mean critic value over visited
+states. **The value fix does not rescue ranking here** — all four stay flat
+(Spearman −0.10 raw, −0.10 value-bootstrap, +0.24 mean-critic-value, all p≫0.4),
+because the critic saturates to ~2.0 on imagined states regardless of policy
+quality. So the null is not just a raw-reward artifact; it survives the
+Dreamer-style fix. The one untested gap is a *co-trained* critic (true Dreamer
+trains the value head inside imagination); with the public checkpoint's critic,
+the value signal doesn't help.
 
 ![Imagined vs real return across the 13-policy spectrum; imagined return is flat](artifacts/dreameval_scatter.png)
 
@@ -124,9 +129,11 @@ box*; the literature qualifies them in two ways.
 - **Planning need not go through observations.** DreamerV3 trains policies in a
   compact latent space over short horizons with a value function for what's
   beyond the horizon; MuZero plans with a *value-equivalent* model that never
-  reconstructs frames at all. Our negative is specific to observation models
-  scored by raw imagined reward, and is consistent with recent findings that even
-  value-equivalent models struggle to rank unseen policies.
+  reconstructs frames at all. We tested the value idea with DIAMOND's own critic
+  (a value-bootstrapped return; see DreamEval) and it still didn't rank, so our
+  negative covers more than raw reward; the untested gap is a *co-trained* critic.
+  It's consistent with recent findings that even value-equivalent models struggle
+  to rank unseen policies.
 
 ## Scope
 
@@ -146,5 +153,7 @@ the agent's policy). Tiny 4.4M-param DIAMOND denoiser; cheap to run.
 Status: decode ≫ simulate, bug-checked end to end. Decode R²≈0.78 (ground-truth,
 leakage-free); fidelity measured in both L1 and a frame-type-fair ball-drift
 metric (on-policy tracks ~60 steps; off-policy cliff ~16–20, similar across
-DIAMOND and IRIS); raw imagined return does not rank policies (Spearman ≈ 0; a
-value-bootstrapped variant via `run_eval_value` is the open test).
+DIAMOND and IRIS); raw imagined return does not rank policies (Spearman ≈ 0), and
+a value-bootstrapped variant using DIAMOND's own critic does not rescue it
+(Spearman −0.10 to +0.24, all p≫0.4). A co-trained Dreamer-style critic is the
+remaining untested gap.
