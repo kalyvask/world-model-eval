@@ -131,6 +131,12 @@ A careful but small-scale study; the bug-checked numbers carry real caveats.
 - **L1 isn't comparable across frame types.** IRIS's discrete VQ-VAE frames stay
   crisp/low-L1 even when wrong; DIAMOND's diffusion frames blur. The
   cross-architecture comparison is directional, not a calibrated metric.
+- **L1 is dominated by the static background.** Breakout is mostly unchanging
+  pixels (walls, bricks, score), so whole-frame L1 is small in absolute terms
+  and the signal of interest (the few ball/paddle pixels) is a tiny fraction;
+  the absolute divergences are small and a little noisy. A decoded-state
+  (ball-position) divergence would weight the thing that matters directly and be
+  comparable across architectures.
 - **CV-detector measurement.** Ball position comes from a frame-differencing
   detector. The ground-truth probe (`probe_truth`, real-frame labels) sidesteps
   it for decode, but the steering outcome still uses it and conflates frame
@@ -141,6 +147,9 @@ A careful but small-scale study; the bug-checked numbers carry real caveats.
   free time split (n≈357).
 - **Small samples, single game.** Breakout only; 16–24 fidelity trajectories, 13
   policies for DreamEval; both world models are small/medium Atari-100k models.
+  Since DIAMOND was trained on the agent's own near-greedy data, the greedy
+  horizon is a best case by construction (off-policy is both rarer in training
+  and where the dream decoheres fastest).
 - **DreamEval mechanism.** The flat imagined return is attributed to fidelity
   decay (imagined reward saturates by ~50 steps); we have not separated
   reward-model error from dynamics error (a teacher-forced reward check would).
