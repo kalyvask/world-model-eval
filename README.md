@@ -10,13 +10,18 @@ Free-running the dream from a real trajectory's context under the same actions
 as the real env, frame divergence shows: the **one-step prediction error is
 0.0020** (≈ the natural consecutive-frame change of 0.0022 — near-perfect), but
 free-running drifts to **half-decorrelated by ~30 steps** (decorrelated ceiling
-0.0075). That one number explains everything below:
+0.0075). The model decodes instantaneous state cleanly but neither sustains nor
+controls it:
 
 - **Decode works** (state R²=0.89): instantaneous state needs only one faithful
   frame, and 1-step fidelity is excellent.
 - **Multi-step policy evaluation fails**: it needs *sustained* fidelity, but
   the dream half-decorrelates by ~30 steps (and DreamEval's imagined reward
   saturates by ~20–30 steps — the same horizon).
+- **Steering fails too** (decode ≫ steer): the decoded ball direction moves the
+  ball no more than a matched-norm random direction — bug-checked (it holds even
+  when injected post-normalization). See
+  [`docs/steering_study.md`](docs/steering_study.md).
 
 **A small open world model decodes instantaneous state well but its ~30-step
 fidelity horizon bounds which use-cases work.** Code: `app_eval.py::fidelity`.
