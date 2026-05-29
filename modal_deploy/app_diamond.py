@@ -18,7 +18,9 @@ import modal
 # src/ is added to sys.path at runtime; config/ is loaded via hydra by abs path.
 image = (
     modal.Image.debian_slim(python_version="3.10")
-    .apt_install("git")
+    # git for the clone; libgl1 + libglib2.0-0 because DIAMOND's env modules
+    # import opencv (cv2), which needs libGL.so.1 (absent from debian_slim).
+    .apt_install("git", "libgl1", "libglib2.0-0")
     .run_commands(
         "git clone https://github.com/eloialonso/diamond /root/diamond",
         "pip install -r /root/diamond/requirements.txt",
