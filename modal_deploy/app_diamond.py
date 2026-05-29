@@ -127,6 +127,7 @@ class DiamondWorldModel:
         os.environ["ENV_TRAIN_ID"] = f"{GAME}NoFrameskip-v4"
         os.environ["ENV_TEST_ID"] = f"{GAME}NoFrameskip-v4"
         test_env = make_atari_env(num_envs=1, device=self.device, **cfg.env.test)
+        self.test_env = test_env  # retained for the ground-truth probe (probe_truth)
         self.num_actions = int(test_env.num_actions)
 
         print(f"Instantiating Agent (num_actions={self.num_actions})...")
@@ -321,6 +322,7 @@ class DiamondWorldModel:
         from sklearn.pipeline import make_pipeline
         from sklearn.preprocessing import StandardScaler
 
+        torch.manual_seed(0)  # reproducible probing rollout
         wm = self.wm_env
         ac = self.agent.actor_critic
         lstm_dim = ac.lstm.hidden_size
@@ -365,7 +367,8 @@ class DiamondWorldModel:
             n_comp = int(min(128, Xtr.shape[0] - 1, Xtr.shape[1]))
             pipe = make_pipeline(StandardScaler(), PCA(n_components=n_comp), Ridge(alpha=10.0))
             pipe.fit(Xtr, ytr)
-            return round(float(r2_score(yte, pipe.predict(Xte))), 3)
+            preds = pipe.predict(Xte)
+            return round(float(r2_score(yte, preds)), 3), np.asarray(yte), np.asarray(preds)
 
         def fit(label_list, name):
             y = np.array([v if v is not None else np.nan for v in label_list], dtype=float)
@@ -377,17 +380,25 @@ class DiamondWorldModel:
             # near-duplicates, so a frame's temporal twin lands in the other split
             # and inflates R^2. The time-ordered split (train on the first 75% of
             # the rollout, test on the last 25%, order preserved by the mask) is
-            # the honest, leakage-free number. Report both to show the gap.
-            Xtr, Xte, ytr, yte = train_test_split(Xs, ys, test_size=0.25, random_state=0)
-            r2_random = _fit_eval(Xtr, Xte, ytr, yte)
+            # the honest, leakage-free number. Report both, plus a bootstrap 68%
+            # CI on the time-split R^2 (resampling the held-out test frames).
+            r2_random, _, _ = _fit_eval(*train_test_split(Xs, ys, test_size=0.25, random_state=0))
             n_tr = int(len(Xs) * 0.75)
-            r2_time = (_fit_eval(Xs[:n_tr], Xs[n_tr:], ys[:n_tr], ys[n_tr:])
-                       if (len(Xs) - n_tr) >= 10 else None)
+            if (len(Xs) - n_tr) >= 10:
+                r2_time, yte_t, preds_t = _fit_eval(Xs[:n_tr], Xs[n_tr:], ys[:n_tr], ys[n_tr:])
+                rng = np.random.default_rng(0)
+                m = len(yte_t)
+                boot = [r2_score(yte_t[ix], preds_t[ix])
+                        for ix in (rng.integers(0, m, m) for _ in range(1000))]
+                ci = [round(float(np.percentile(boot, 16)), 3), round(float(np.percentile(boot, 84)), 3)]
+            else:
+                r2_time, ci = None, None
             return {
                 "concept": name,
                 "n": int(mask.sum()),
                 "test_r2_random_split": r2_random,
                 "test_r2_time_split": r2_time,
+                "test_r2_time_ci68": ci,
                 "label_std_px": round(float(ys.std()), 2),
             }
 
@@ -421,6 +432,105 @@ class DiamondWorldModel:
                 for t in list(zip(bx[:14], by[:14], px[:14]))
             ],
             "probes": results,
+        }
+
+    @modal.method()
+    def probe_truth(self, n_frames: int = 400, pool: int = 16):
+        """Ground-truth decode: does the UNet activation linearly encode the TRUE
+        ball position (not the model's own rendering)? Roll the REAL env (greedy +
+        FIRE); at each step seed the WM from the last n_cond REAL frames/acts, run
+        ONE prediction to capture the UNet activation, and label it with the ball
+        position detected on the clean REAL frame being predicted. Removes
+        probe()'s near-circularity (it labels generated frames from the activation
+        that drew them) and the generation-artifact CV noise. Time-split R^2 +
+        bootstrap 68% CI, same protocol as probe().
+        """
+        import numpy as np
+        import torch
+        import torch.nn.functional as F
+        from sklearn.decomposition import PCA
+        from sklearn.linear_model import Ridge
+        from sklearn.metrics import r2_score
+        from sklearn.model_selection import train_test_split
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        torch.manual_seed(0)
+        n_cond = int(self.cfg.agent.denoiser.inner_model.num_steps_conditioning)
+        wm, ac, dev = self.wm_env, self.agent.actor_critic, self.device
+
+        def is_done(step_out):
+            for v in (step_out[2], step_out[3]):
+                try:
+                    arr = v.detach().cpu().numpy() if torch.is_tensor(v) else np.asarray(v)
+                    if bool(arr.any()):
+                        return True
+                except Exception:
+                    if bool(v):
+                        return True
+            return False
+
+        # 1) collect a REAL trajectory (greedy policy + FIRE burn-in)
+        reset_out = self.test_env.reset()
+        obs = reset_out[0] if isinstance(reset_out, (tuple, list)) else reset_out
+        hx = torch.zeros(1, ac.lstm.hidden_size, device=dev); cx = torch.zeros_like(hx)
+        frames = [obs.detach().clone()]; acts = []
+        for t in range(n_frames + n_cond + 1):
+            with torch.no_grad():
+                o = ac.predict_act_value(obs, (hx, cx))
+            hx, cx = o.hx_cx
+            a = torch.ones(1, dtype=torch.long, device=dev) if t < 8 else o.logits_act.argmax(-1).long()
+            step_out = self.test_env.step(a)
+            obs = step_out[0]
+            frames.append(obs.detach().clone()); acts.append(a)
+            if is_done(step_out):
+                break
+
+        # 2) per step, capture the WM's 1-step-prediction activation on REAL
+        #    context; label with the TRUE ball position (CV on the real frame).
+        feats, yb = [], []
+        for t in range(n_cond, len(frames) - 1):
+            wm.obs_buffer = torch.stack(frames[t - n_cond:t], dim=1).to(dev)
+            wm.act_buffer = torch.stack(acts[t - n_cond:t], dim=1).to(dev)
+            self._cap.clear()
+            wm.predict_next_obs()
+            if not self._cap:
+                continue
+            pooled = F.adaptive_avg_pool2d(self._cap[-1].float(), (pool, pool)).flatten().cpu().numpy()
+            fr = frames[t].detach().float().squeeze(0).cpu().numpy()
+            prevfr = frames[t - 1].detach().float().squeeze(0).cpu().numpy()
+            bx, _, _ = _detect_ball_paddle(fr, prevfr)
+            feats.append(pooled); yb.append(bx if bx is not None else np.nan)
+
+        X = np.asarray(feats, dtype=np.float32)
+        y = np.asarray(yb, dtype=float)
+        mask = ~np.isnan(y)
+        if mask.sum() < 60:
+            return {"game": GAME, "label_source": "ground_truth_real_frames",
+                    "n_frames": n_frames, "n_detected": int(mask.sum()),
+                    "note": "too few detections"}
+        Xs, ys = X[mask], y[mask]
+
+        def _fit_eval(Xtr, Xte, ytr, yte):
+            n_comp = int(min(128, Xtr.shape[0] - 1, Xtr.shape[1]))
+            pipe = make_pipeline(StandardScaler(), PCA(n_components=n_comp), Ridge(alpha=10.0))
+            pipe.fit(Xtr, ytr)
+            preds = pipe.predict(Xte)
+            return round(float(r2_score(yte, preds)), 3), np.asarray(yte), np.asarray(preds)
+
+        r2_random, _, _ = _fit_eval(*train_test_split(Xs, ys, test_size=0.25, random_state=0))
+        n_tr = int(len(Xs) * 0.75)
+        r2_time, yte_t, preds_t = _fit_eval(Xs[:n_tr], Xs[n_tr:], ys[:n_tr], ys[n_tr:])
+        rng = np.random.default_rng(0); m = len(yte_t)
+        boot = [r2_score(yte_t[ix], preds_t[ix]) for ix in (rng.integers(0, m, m) for _ in range(1000))]
+        ci = [round(float(np.percentile(boot, 16)), 3), round(float(np.percentile(boot, 84)), 3)]
+        return {
+            "game": GAME, "concept": "ball_x", "label_source": "ground_truth_real_frames",
+            "n_frames": n_frames, "n_detected": int(mask.sum()),
+            "test_r2_random_split": r2_random,
+            "test_r2_time_split": r2_time,
+            "test_r2_time_ci68": ci,
+            "label_std_px": round(float(ys.std()), 2),
         }
 
     @modal.method()
@@ -567,6 +677,15 @@ def probe(n_frames: int = 400, pool: int = 16):
 
     wm = DiamondWorldModel()
     info = wm.probe.remote(n_frames=n_frames, pool=pool)
+    print(json.dumps(info, indent=2))
+
+
+@app.local_entrypoint()
+def probe_truth(n_frames: int = 400, pool: int = 16):
+    import json
+
+    wm = DiamondWorldModel()
+    info = wm.probe_truth.remote(n_frames=n_frames, pool=pool)
     print(json.dumps(info, indent=2))
 
 

@@ -51,8 +51,8 @@ testbed** — real rollouts are cheap here, so we use them as ground truth. We d
   reward **saturates by ~20–30 steps** (flat horizon curve). **Honest verdict:
   imagined return is NOT a reliable policy evaluator on DIAMOND-Breakout** — the
   n=7 positive was small-n / good-vs-random-extremes fragility.
-- Consolidated: a small world model **decodes** state (ball_x R²≈0.73,
-  leakage-corrected; steering study) but does not faithfully **simulate** —
+- Consolidated: a small world model **decodes** state (ball_x R²≈0.78,
+  ground-truth labels, leakage-free; steering study) but does not faithfully **simulate** —
   neither clean steering nor reliable policy eval holds. Decode ≫ simulate.
 - **Capstone — fidelity horizon** (`app_eval.py::fidelity`): free-running the
   dream from a real context under the same actions, one-step error = 0.0020

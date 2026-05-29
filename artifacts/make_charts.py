@@ -22,9 +22,9 @@ HERE = Path(__file__).resolve().parent
 
 # ---- DreamEval 13-policy data (captured from the run; see README) ----
 EVAL_EPS = [0.0, 0.083, 0.167, 0.25, 0.333, 0.417, 0.5, 0.583, 0.667, 0.75, 0.833, 0.917, 1.0]
-EVAL_REAL = [8.5, 8.6, 7.8, 7.5, 6.6, 5.8, 5.9, 3.8, 3.0, 4.2, 4.0, 1.8, 1.1]
-EVAL_IMAG = [0.5, 0.375, 0.417, 0.375, 0.5, 0.25, 0.5, 0.375, 0.417, 0.417, 0.292, 0.333, 0.458]
-EVAL_SPEARMAN = 0.22
+EVAL_REAL = [8.9, 8.8, 8.4, 7.4, 6.1, 6.0, 4.7, 3.7, 3.6, 3.0, 2.2, 1.9, 1.7]
+EVAL_IMAG = [0.5, 0.406, 0.375, 0.469, 0.469, 0.344, 0.438, 0.5, 0.438, 0.469, 0.438, 0.562, 0.281]
+EVAL_SPEARMAN = 0.01
 
 # ---- Fidelity-horizon runs (captured; sustained crossing + 68% bootstrap CI) ----
 # Matched random-action protocol for the cross-model comparison; DIAMOND greedy
@@ -106,7 +106,7 @@ def eval_chart():
     ax.set_title(f"Imagined return does not rank policies (Spearman {EVAL_SPEARMAN})")
     ax.set_ylim(0, max(EVAL_IMAG) * 1.5)
     ax.grid(alpha=0.2)
-    ax.text(0.04, 0.96, "real return spans 1.1–8.6;\nimagined return is flat ~0.4",
+    ax.text(0.04, 0.96, "real return spans 1.7–8.9;\nimagined return is flat ~0.4",
             transform=ax.transAxes, va="top", fontsize=9, color="#374151")
     fig.tight_layout()
     out = HERE / "dreameval_scatter.png"

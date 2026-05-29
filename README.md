@@ -16,8 +16,9 @@ the horizon is real but it's an *in-distribution* number, not a constant.
 
 The model decodes instantaneous state cleanly but neither sustains nor controls it:
 
-- **Decode works** (ball-position R²≈0.73, leakage-corrected time-split): one
-  faithful frame is enough; 1-step fidelity is excellent.
+- **Decode works** (ball-position R²≈0.78 [0.72, 0.82], ground-truth real-frame
+  labels + leakage-free time-split): one faithful frame is enough; 1-step
+  fidelity is excellent.
 - **Multi-step policy evaluation fails**: it needs *sustained* fidelity, but the
   dream decorrelates within ~30 steps (DreamEval's imagined reward saturates by
   ~20–30 — the same horizon).
@@ -67,26 +68,56 @@ return in the actual Atari env. The canonical applied use-case for world models
 
 **Result (DIAMOND-Breakout): imagined return is *not* a reliable policy
 evaluator here.** Across an epsilon-greedy spectrum (eps 0 = good → 1 = random),
-real return falls cleanly (8.5 → 1.1) but imagined return stays **flat at ~0.4
+real return falls cleanly (8.9 → 1.7) but imagined return stays **flat at ~0.4
 regardless of policy quality** (random ≈ good). The rank correlation is sample-
 fragile: at 7 coarse policies it looks promising (Spearman 0.78, p=0.04) but
 that is driven by the good-vs-random extremes + small n — on a **finer 13-policy
-grid it collapses to Spearman 0.22 (p=0.47)**. The dream's imagined reward
+grid it collapses to near zero (Spearman 0.22, then 0.01 on a bug-checked
+re-run; both p≫0.1)**. The dream's imagined reward
 **saturates by ~20–30 steps** (the rollout goes inert after the ball is lost),
 so it captures only the coarsest good-vs-random distinction, not a usable
 ranking.
 
 ![Imagined vs real return across the 13-policy spectrum; imagined return is flat](artifacts/dreameval_scatter.png)
 
-*Real return falls cleanly from 8.6 to 1.1 across the epsilon spectrum (color),
+*Real return falls cleanly from 8.9 to 1.7 across the epsilon spectrum (color),
 but imagined return stays flat at ~0.4 regardless of policy quality. Spearman
-0.22 (p=0.47) at 13 policies: no usable ranking signal.*
+0.01 (p=0.96) at 13 policies: no usable ranking signal.*
 
-Takeaway: a small open world model decodes state well (ball-position R²≈0.73)
+Takeaway: a small open world model decodes state well (ball-position R²≈0.78)
 but its imagined rollouts are too low-fidelity to rank policies at fine
 resolution. It **decodes but does not faithfully *simulate***.
 
 Code: `modal_deploy/app_eval.py` · plan: [`BUILD_PLAN.md`](BUILD_PLAN.md)
+
+---
+
+## Limitations
+
+A careful but small-scale study; the bug-checked numbers carry real caveats.
+
+- **Window-relative horizons.** The half-decorrelation step is normalized to
+  each run's floor-to-ceiling (ceiling = L1 between real frames `horizon` apart).
+  Greedy first-touch is stable (~30 at windows of 30/60/120), but the *sustained*
+  crossing drifts (30→68) and the *random*-policy crossing slides 5→10→22 with
+  the window (its curve never plateaus), so the off-policy "horizon" is only
+  loosely defined.
+- **L1 isn't comparable across frame types.** IRIS's discrete VQ-VAE frames stay
+  crisp/low-L1 even when wrong; DIAMOND's diffusion frames blur. The
+  cross-architecture comparison is directional, not a calibrated metric.
+- **CV-detector measurement.** Ball position comes from a frame-differencing
+  detector. The ground-truth probe (`probe_truth`, real-frame labels) sidesteps
+  it for decode, but the steering outcome still uses it and conflates frame
+  degradation with motion under large perturbations. Paddle decode is degenerate
+  (constant label) and is dropped.
+- **Decode is rollout-sensitive.** On generated frames ball_x R² ranged 0.73–0.91
+  across rollouts; the headline 0.78 [0.72, 0.82] is the ground-truth, leakage-
+  free time split (n≈357).
+- **Small samples, single game.** Breakout only; 16–24 fidelity trajectories, 13
+  policies for DreamEval; both world models are small/medium Atari-100k models.
+- **DreamEval mechanism.** The flat imagined return is attributed to fidelity
+  decay (imagined reward saturates by ~50 steps); we have not separated
+  reward-model error from dynamics error (a teacher-forced reward check would).
 
 ---
 
@@ -96,9 +127,10 @@ under the agent's policy). Tiny 4.4M-param denoiser; cheap to run.
 
 Status: DreamEval E1–E3 done. Strengthening (more rollouts, then a 13-policy
 grid) reversed the n=7 positive: imagined return does not reliably rank policies
-(Spearman 0.22, p=0.47 at 13 policies). Honest negative; decode ≫ simulate.
+(Spearman near zero, p≫0.1 at 13 policies). Honest negative; decode ≫ simulate.
 
-Headline numbers are bug-checked: decode R² is leakage-corrected (time-ordered
-split, not random), the fidelity crossing uses a sustained metric + bootstrap CI
-over trajectories, and the cross-architecture comparison uses a matched
-action protocol — which removed an earlier, confounded "~30 ≈ ~31" claim.
+Headline numbers are bug-checked: decode R² uses ground-truth real-frame labels
++ a leakage-free time split with a bootstrap CI; the fidelity crossing uses a
+sustained metric + bootstrap CI and is reported across action policies and
+window lengths; and the cross-architecture comparison uses a matched action
+protocol — which removed an earlier, confounded "~30 ≈ ~31" claim. See Limitations.
