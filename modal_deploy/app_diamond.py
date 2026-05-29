@@ -32,7 +32,7 @@ image = (
         "pip install 'autorom[accept-rom-license]' || true",
         "AutoROM --accept-license || true",
     )
-    .pip_install("huggingface_hub")
+    .pip_install("huggingface_hub", "scikit-learn")
 )
 
 app = modal.App("world-model-steering-diamond")
@@ -42,6 +42,41 @@ hf_volume = modal.Volume.from_name("hf-cache", create_if_missing=True)
 # probing literature). ALE Breakout has 4 actions.
 GAME = "Breakout"
 NUM_ACTIONS = 4
+
+
+def _detect_ball_paddle(frame_chw, prev_chw=None):
+    """CV labels from a generated Breakout frame (3,H,W) in [-1,1].
+
+    Paddle: brightest pixels in the bottom band (no bricks there).
+    Ball: the MOVING bright object, via frame differencing in the play area
+    (robust to the static bright brick mass). Returns None for the ball on the
+    first frame or when there's no motion.
+    """
+    import numpy as np
+
+    g = ((frame_chw.mean(0) + 1.0) / 2.0).clip(0, 1)  # (H,W) grayscale [0,1]
+    H, W = g.shape
+
+    # Paddle: bright pixels in the bottom band.
+    pad_x = None
+    band = g[int(H * 0.86):, :]
+    pys, pxs = np.nonzero(band > 0.5)
+    if pxs.size > 2:
+        pad_x = float(pxs.mean())
+
+    # Ball: the moving bright object (frame diff), in the play area below the
+    # bricks and above the paddle. Static bricks cancel out in the difference.
+    ball_x = ball_y = None
+    if prev_chw is not None:
+        pg = ((prev_chw.mean(0) + 1.0) / 2.0).clip(0, 1)
+        y0, y1 = int(H * 0.40), int(H * 0.84)
+        d = np.abs(g[y0:y1, :] - pg[y0:y1, :])
+        if d.size and float(d.max()) > 0.08:
+            bys, bxs = np.nonzero(d >= d.max() * 0.7)
+            if bxs.size > 0:
+                ball_x = float(bxs.mean())
+                ball_y = float(bys.mean()) + y0
+    return ball_x, ball_y, pad_x
 
 
 @app.cls(
@@ -238,6 +273,118 @@ class DiamondWorldModel:
             "saved_frames": saved,
         }
 
+    @modal.method()
+    def probe(self, n_frames: int = 400, pool: int = 16):
+        """P3: is game state linearly decodable from the UNet activation?
+
+        Roll out the world model with random actions (so ball/paddle move),
+        capture the full spatial UNet activation per frame (adaptive-pooled to
+        pool x pool to keep the probe tractable), CV-detect ball/paddle in the
+        generated frame, then ridge-regress activation -> position on a held-out
+        split. High test R^2 => the activation linearly encodes that concept
+        (and gives us a steering direction for P4). Saves (X, labels) for P4.
+        """
+        from pathlib import Path
+
+        import numpy as np
+        import torch
+        import torch.nn.functional as F
+        from sklearn.decomposition import PCA
+        from sklearn.linear_model import Ridge
+        from sklearn.metrics import r2_score
+        from sklearn.model_selection import train_test_split
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        wm = self.wm_env
+        ac = self.agent.actor_critic
+        lstm_dim = ac.lstm.hidden_size
+        hx = torch.zeros(1, lstm_dim, device=self.device)
+        cx = torch.zeros(1, lstm_dim, device=self.device)
+        reset_out = wm.reset()
+        obs = reset_out[0] if isinstance(reset_out, (tuple, list)) else reset_out
+
+        feats, bx, by, px = [], [], [], []
+        frame_l1 = []
+        prev_fr = None
+        n_fire = 8  # FIRE burn-in to launch the ball
+        for i in range(n_frames):
+            # Drive imagination with the pretrained policy (on-distribution),
+            # forcing FIRE early to launch the ball.
+            with torch.no_grad():
+                ac_out = ac.predict_act_value(obs, (hx, cx))
+            hx, cx = ac_out.hx_cx
+            if i < n_fire:
+                a = torch.tensor([1], dtype=torch.long, device=self.device)  # FIRE
+            else:
+                a = torch.distributions.Categorical(logits=ac_out.logits_act).sample().long()
+            self._cap.clear()
+            step_out = wm.step(a)
+            next_obs = step_out[0]
+            obs = next_obs
+            if not self._cap:
+                continue
+            act = self._cap[-1].float()  # (1, 64, 64, 64)
+            pooled = F.adaptive_avg_pool2d(act, (pool, pool)).flatten().cpu().numpy()
+            fr = next_obs.detach().float().squeeze(0).cpu().numpy()  # (3, H, W)
+            if prev_fr is not None:
+                frame_l1.append(float(np.abs(fr - prev_fr).mean()))
+            bxc, byc, pxc = _detect_ball_paddle(fr, prev_fr)
+            prev_fr = fr
+            feats.append(pooled)
+            bx.append(bxc); by.append(byc); px.append(pxc)
+
+        X = np.asarray(feats, dtype=np.float32)
+
+        def fit(label_list, name):
+            y = np.array([v if v is not None else np.nan for v in label_list], dtype=float)
+            mask = ~np.isnan(y)
+            if mask.sum() < 60:
+                return {"concept": name, "n": int(mask.sum()), "test_r2": None, "note": "too few detections"}
+            Xs, ys = X[mask], y[mask]
+            Xtr, Xte, ytr, yte = train_test_split(Xs, ys, test_size=0.25, random_state=0)
+            n_comp = int(min(128, Xtr.shape[0] - 1, Xtr.shape[1]))
+            pipe = make_pipeline(StandardScaler(), PCA(n_components=n_comp), Ridge(alpha=10.0))
+            pipe.fit(Xtr, ytr)
+            return {
+                "concept": name,
+                "n": int(mask.sum()),
+                "test_r2": round(float(r2_score(yte, pipe.predict(Xte))), 3),
+                "label_std_px": round(float(ys.std()), 2),
+            }
+
+        results = [fit(bx, "ball_x"), fit(by, "ball_y"), fit(px, "paddle_x")]
+
+        out_dir = Path(f"/cache/wms_capture/{GAME}")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            out_dir / "probe_data.npz",
+            X=X,
+            ball_x=np.array([v if v is not None else np.nan for v in bx]),
+            ball_y=np.array([v if v is not None else np.nan for v in by]),
+            paddle_x=np.array([v if v is not None else np.nan for v in px]),
+            pool=pool,
+        )
+        try:
+            hf_volume.commit()
+        except Exception:
+            pass
+        return {
+            "game": GAME,
+            "n_frames": n_frames,
+            "feat_dim": int(X.shape[1]) if X.size else 0,
+            "pool": pool,
+            "detect_rate_ball": round(float(np.mean([v is not None for v in bx])), 3),
+            "detect_rate_paddle": round(float(np.mean([v is not None for v in px])), 3),
+            "frame_l1_mean": round(float(np.mean(frame_l1)), 4) if frame_l1 else 0.0,
+            "feat_std_across_frames": round(float(X.std(axis=0).mean()), 5) if X.size else 0.0,
+            "label_sample_ballx_bally_padx": [
+                [None if v is None else round(v, 1) for v in t]
+                for t in list(zip(bx[:14], by[:14], px[:14]))
+            ],
+            "probes": results,
+        }
+
 
 @app.local_entrypoint()
 def introspect():
@@ -254,4 +401,13 @@ def capture(n_frames: int = 16, action: int = 1):
 
     wm = DiamondWorldModel()
     info = wm.capture.remote(n_frames=n_frames, action=action)
+    print(json.dumps(info, indent=2))
+
+
+@app.local_entrypoint()
+def probe(n_frames: int = 400, pool: int = 16):
+    import json
+
+    wm = DiamondWorldModel()
+    info = wm.probe.remote(n_frames=n_frames, pool=pool)
     print(json.dumps(info, indent=2))
