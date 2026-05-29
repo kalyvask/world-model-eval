@@ -150,7 +150,100 @@ class IrisWorldModel:
         return info
 
 
+    @modal.method()
+    def fidelity(self, n_traj: int = 8, horizon: int = 60, fire: int = 8):
+        """Same measurement as DIAMOND's app_eval.py::fidelity, on IRIS: seed the
+        world model from a real post-burn-in frame, free-run under a fixed action
+        sequence, and measure normalized frame divergence vs step. Output format
+        matches DIAMOND's so the horizons are directly comparable.
+        """
+        import numpy as np
+        import torch
+
+        dev = self.device
+
+        def to_nchw01(o):
+            t = o if torch.is_tensor(o) else torch.as_tensor(o)
+            t = t.to(dev).float()
+            if t.dim() == 3:
+                t = t.unsqueeze(0)
+            if t.shape[-1] == 3:               # NHWC -> NCHW
+                t = t.permute(0, 3, 1, 2)
+            if float(t.max()) > 1.5:           # [0,255] -> [0,1]
+                t = t / 255.0
+            return t
+
+        def l1(a, b):
+            return float((a - b).abs().mean().item())
+
+        def real_step(a):
+            try:
+                out = self.test_env.step(np.array([a]))
+            except Exception:
+                out = self.test_env.step(a)
+            obs = out[0]
+            done = out[2] if len(out) > 2 else False
+            try:
+                done = bool(np.asarray(done).any())
+            except Exception:
+                done = bool(done)
+            return obs, done
+
+        all_div, real_consec, ceil_diffs = [], [], []
+        need = fire + horizon + 1
+        for tr in range(n_traj):
+            torch.manual_seed(700 + tr)
+            rng = np.random.default_rng(700 + tr)
+            actions = [1] * fire + [int(rng.integers(0, self.num_actions)) for _ in range(horizon)]
+            reset_out = self.test_env.reset()
+            obs = reset_out[0] if isinstance(reset_out, (tuple, list)) else reset_out
+            frames = [to_nchw01(obs)]
+            ok = True
+            for t in range(need - 1):
+                obs, done = real_step(actions[t])
+                frames.append(to_nchw01(obs))
+                if done:
+                    ok = False
+                    break
+            if not ok or len(frames) < need:
+                continue
+
+            self.wm_env.reset_from_initial_observations(frames[fire])
+            divs = []
+            for k in range(horizon):
+                imagined, _, _, _ = self.wm_env.step(actions[fire + k])
+                img = to_nchw01(imagined)
+                divs.append(l1(img, frames[fire + k + 1]))
+            all_div.append(divs)
+            for t in range(1, len(frames)):
+                real_consec.append(l1(frames[t], frames[t - 1]))
+            ceil_diffs.append(l1(frames[fire], frames[fire + horizon]))
+
+        if not all_div:
+            return {"game": GAME, "model": "IRIS", "error": "no full-length trajectories", "n_traj": n_traj}
+        div = np.array(all_div)
+        mean_div = div.mean(0)
+        floor = float(mean_div[0])
+        ceiling = float(np.mean(ceil_diffs))
+        thresh = floor + 0.5 * (ceiling - floor)
+        cross = next((k + 1 for k, v in enumerate(mean_div) if v >= thresh), None)
+        return {
+            "game": GAME, "model": "IRIS", "n_traj_used": len(all_div), "horizon": horizon,
+            "one_step_error": round(floor, 4),
+            "real_consecutive_frame_diff": round(float(np.mean(real_consec)), 4),
+            "decorrelated_ceiling": round(ceiling, 4),
+            "half_decorrelation_step": cross,
+            "divergence_curve": [round(float(v), 4) for v in mean_div],
+        }
+
+
 @app.local_entrypoint()
 def smoke():
     import json
     print(json.dumps(IrisWorldModel().smoke.remote(), indent=2))
+
+
+@app.local_entrypoint()
+def fidelity(n_traj: int = 8, horizon: int = 60):
+    import json
+    print(json.dumps(IrisWorldModel().fidelity.remote(n_traj=n_traj, horizon=horizon), indent=2))

@@ -21,6 +21,17 @@ free-running drifts to **half-decorrelated by ~30 steps** (decorrelated ceiling
 **A small open world model decodes instantaneous state well but its ~30-step
 fidelity horizon bounds which use-cases work.** Code: `app_eval.py::fidelity`.
 
+**It's not a DIAMOND quirk — it holds across architecture and scale.** Running
+the same measurement on **IRIS** (a VQ-VAE + Transformer world model, several
+times larger than DIAMOND's 4.4M diffusion core) gives a half-decorrelation
+step of **~31 — essentially identical to DIAMOND's ~30**, despite a completely
+different architecture. (IRIS's absolute per-frame divergences are smaller —
+sharper VQ-VAE frames — but the horizon, measured relative to each model's own
+floor→ceiling, matches.) So the short fidelity horizon generalizes across
+diffusion vs autoregressive-transformer and a meaningful scale step. Code:
+`app_iris.py::fidelity`. (Caveat: both are small/medium Atari models; a
+frontier-scale test would need closed models like Genie.)
+
 ---
 
 Two studies share the same DIAMOND-on-Modal infrastructure, both explained by
