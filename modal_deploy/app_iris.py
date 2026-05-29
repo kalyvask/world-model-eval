@@ -102,6 +102,31 @@ def _fidelity_stats(all_div, ceil_diffs, n_boot=2000, seed=0):
     }
 
 
+def _ball_xy(frame_chw, prev_chw):
+    """(x, y) of the moving ball in a Breakout frame (C,H,W) via frame-diff,
+    range-robust ([-1,1] or [0,1]); (None, None) if not found. Identical to
+    app_eval._ball_xy so DIAMOND and IRIS ball-drift are measured the same way."""
+    import numpy as np
+
+    def gray(f):
+        g = f.mean(0)
+        if float(g.min()) < -0.01:
+            g = (g + 1.0) / 2.0
+        return np.clip(g, 0.0, 1.0)
+
+    if prev_chw is None:
+        return (None, None)
+    g, pg = gray(frame_chw), gray(prev_chw)
+    H, W = g.shape
+    y0, y1 = int(H * 0.40), int(H * 0.84)
+    d = np.abs(g[y0:y1, :] - pg[y0:y1, :])
+    if d.size and float(d.max()) > 0.08:
+        ys, xs = np.nonzero(d >= d.max() * 0.7)
+        if xs.size > 0:
+            return (float(xs.mean()), float(ys.mean()) + y0)
+    return (None, None)
+
+
 @app.cls(
     image=image,
     gpu="A100-40GB",  # torch 1.11 supports sm_80; L40S (sm_89) is too new for it
@@ -288,6 +313,121 @@ class IrisWorldModel:
         })
         return stats
 
+    @modal.method()
+    def fidelity_ball(self, n_traj: int = 16, horizon: int = 60, fire: int = 8):
+        """Decoded-state fidelity for IRIS (ball-drift px), matching DIAMOND's
+        fidelity_ball so the two are comparable in the SAME units (unlike L1,
+        which isn't comparable across diffusion vs VQ-VAE frames). Random-action
+        protocol; ceiling = mean ball distance between random unrelated real
+        frames; "dream lost the ball" counts as ceiling-level drift.
+        """
+        import numpy as np
+        import torch
+
+        dev = self.device
+
+        def to_nchw01(o):
+            t = o if torch.is_tensor(o) else torch.as_tensor(o)
+            t = t.to(dev).float()
+            if t.dim() == 3:
+                t = t.unsqueeze(0)
+            if t.shape[-1] == 3:
+                t = t.permute(0, 3, 1, 2)
+            if float(t.max()) > 1.5:
+                t = t / 255.0
+            return t
+
+        def real_step(a):
+            try:
+                out = self.test_env.step(np.array([a]))
+            except Exception:
+                out = self.test_env.step(a)
+            obs = out[0]
+            done = out[2] if len(out) > 2 else False
+            try:
+                done = bool(np.asarray(done).any())
+            except Exception:
+                done = bool(done)
+            return obs, done
+
+        def chw(t):
+            return t.detach().float().squeeze(0).cpu().numpy()
+
+        img_pts_all, real_pts_all, real_positions = [], [], []
+        need = fire + horizon + 1
+        for tr in range(n_traj):
+            torch.manual_seed(700 + tr)
+            rng = np.random.default_rng(700 + tr)
+            actions = [1] * fire + [int(rng.integers(0, self.num_actions)) for _ in range(horizon)]
+            reset_out = self.test_env.reset()
+            obs = reset_out[0] if isinstance(reset_out, (tuple, list)) else reset_out
+            frames = [to_nchw01(obs)]
+            ok = True
+            for t in range(need - 1):
+                obs, done = real_step(actions[t])
+                frames.append(to_nchw01(obs))
+                if done:
+                    ok = False
+                    break
+            if not ok or len(frames) < need:
+                continue
+
+            real_xy = [(None, None)] + [_ball_xy(chw(frames[t]), chw(frames[t - 1])) for t in range(1, len(frames))]
+            real_positions.extend([p for p in real_xy if p[0] is not None])
+
+            self.wm_env.reset_from_initial_observations(frames[fire])
+            prev_img = chw(frames[fire])
+            img_xy = []
+            for k in range(horizon):
+                imagined, _, _, _ = self.wm_env.step(actions[fire + k])
+                inp = chw(to_nchw01(imagined))
+                img_xy.append(_ball_xy(inp, prev_img)); prev_img = inp
+            img_pts_all.append(img_xy)
+            real_pts_all.append([real_xy[fire + k + 1] for k in range(horizon)])
+
+        if not img_pts_all:
+            return {"game": GAME, "model": "IRIS", "metric": "ball_drift_px",
+                    "error": "no full-length trajectories"}
+
+        pts = np.array([[x, y] for (x, y) in real_positions], dtype=float)
+        rng = np.random.default_rng(0)
+        if len(pts) >= 2:
+            i, j = rng.integers(0, len(pts), 5000), rng.integers(0, len(pts), 5000)
+            ceiling = float(np.mean(np.hypot(pts[i, 0] - pts[j, 0], pts[i, 1] - pts[j, 1])))
+        else:
+            ceiling = float("nan")
+
+        H = horizon
+        drift = np.full((len(img_pts_all), H), np.nan)
+        lost = np.zeros(H)
+        for tr in range(len(img_pts_all)):
+            for k in range(H):
+                ix, iy = img_pts_all[tr][k]
+                rx, ry = real_pts_all[tr][k]
+                if rx is None:
+                    continue
+                if ix is None:
+                    drift[tr, k] = ceiling
+                    lost[k] += 1
+                else:
+                    drift[tr, k] = float(np.hypot(ix - rx, iy - ry))
+        mean_drift = np.array([np.nanmean(drift[:, k]) if np.any(~np.isnan(drift[:, k])) else np.nan
+                               for k in range(H)])
+        floor_idx = next((k for k in range(H) if not np.isnan(mean_drift[k])), None)
+        floor = float(mean_drift[floor_idx]) if floor_idx is not None else float("nan")
+        thresh = floor + 0.5 * (ceiling - floor)
+        cross = next((k + 1 for k in range((floor_idx or 0), H)
+                      if not np.isnan(mean_drift[k]) and mean_drift[k] >= thresh), None)
+        return {
+            "game": GAME, "model": "IRIS", "policy": "random", "metric": "ball_drift_px",
+            "n_traj_used": len(img_pts_all), "horizon": horizon, "fire": fire,
+            "one_step_ball_drift_px": round(floor, 2),
+            "random_pair_ceiling_px": round(ceiling, 2),
+            "half_decorrelation_step": cross,
+            "ball_drift_curve": [round(float(v), 2) if not np.isnan(v) else None for v in mean_drift],
+            "imagined_ball_lost_rate": [round(float(x) / len(img_pts_all), 2) for x in lost],
+        }
+
 
 @app.local_entrypoint()
 def smoke():
@@ -299,3 +439,9 @@ def smoke():
 def fidelity(n_traj: int = 8, horizon: int = 60):
     import json
     print(json.dumps(IrisWorldModel().fidelity.remote(n_traj=n_traj, horizon=horizon), indent=2))
+
+
+@app.local_entrypoint()
+def fidelity_ball(n_traj: int = 16, horizon: int = 60):
+    import json
+    print(json.dumps(IrisWorldModel().fidelity_ball.remote(n_traj=n_traj, horizon=horizon), indent=2))

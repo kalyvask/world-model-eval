@@ -95,6 +95,31 @@ def _fidelity_stats(all_div, ceil_diffs, n_boot=2000, seed=0):
     }
 
 
+def _ball_xy(frame_chw, prev_chw):
+    """(x, y) of the moving ball in a Breakout frame (C,H,W) via frame-diff in the
+    play area, range-robust ([-1,1] or [0,1]); (None, None) if not found. Shared
+    by DIAMOND and IRIS so the decoded-state metric is measured identically."""
+    import numpy as np
+
+    def gray(f):
+        g = f.mean(0)
+        if float(g.min()) < -0.01:        # [-1,1] -> [0,1]
+            g = (g + 1.0) / 2.0
+        return np.clip(g, 0.0, 1.0)
+
+    if prev_chw is None:
+        return (None, None)
+    g, pg = gray(frame_chw), gray(prev_chw)
+    H, W = g.shape
+    y0, y1 = int(H * 0.40), int(H * 0.84)
+    d = np.abs(g[y0:y1, :] - pg[y0:y1, :])
+    if d.size and float(d.max()) > 0.08:
+        ys, xs = np.nonzero(d >= d.max() * 0.7)
+        if xs.size > 0:
+            return (float(xs.mean()), float(ys.mean()) + y0)
+    return (None, None)
+
+
 @app.cls(
     image=image,
     gpu="L40S",
@@ -451,6 +476,115 @@ class DreamEval:
         })
         return stats
 
+    @modal.method()
+    def fidelity_ball(self, n_traj: int = 24, horizon: int = 60, policy: str = "random", fire: int = 8):
+        """Decoded-state fidelity: free-run the dream (seeded AFTER the FIRE
+        burn-in, so the ball is in play) and measure how far the IMAGINED ball
+        drifts from the TRUE ball (pixels), instead of whole-frame L1. Weights the
+        signal of interest (not the static background) and is comparable across
+        architectures (both render a 64x64 ball). Ceiling = mean distance between
+        ball positions in RANDOM unrelated real frames (window-independent). If
+        the dream loses the ball where the real frame has one, that step counts
+        as ceiling-level drift.
+        """
+        import numpy as np
+        import torch
+
+        n_cond = int(self.cfg.agent.denoiser.inner_model.num_steps_conditioning)
+        start = max(fire, n_cond)          # free-run begins here (ball launched)
+        wm, ac, dev = self.wm_env, self.agent.actor_critic, self.device
+
+        def chw(t):
+            return t.detach().float().squeeze(0).cpu().numpy()
+
+        img_pts_all, real_pts_all, real_positions = [], [], []
+        need = start + horizon + 1
+        for tr in range(n_traj):
+            torch.manual_seed(500 + tr)
+            rng = np.random.default_rng(500 + tr)
+            reset_out = self.test_env.reset()
+            obs = reset_out[0] if isinstance(reset_out, (tuple, list)) else reset_out
+            hx, cx = self._zeros_hidden()
+            frames = [obs.detach().clone()]; acts = []
+            for t in range(need):
+                if t < fire:
+                    a = torch.ones(1, dtype=torch.long, device=dev)
+                elif policy == "random":
+                    a = torch.tensor([int(rng.integers(0, self.num_actions))], dtype=torch.long, device=dev)
+                else:
+                    with torch.no_grad():
+                        o = ac.predict_act_value(obs, (hx, cx))
+                    hx, cx = o.hx_cx
+                    a = o.logits_act.argmax(-1).long()
+                step_out = self.test_env.step(a)
+                obs = step_out[0]
+                frames.append(obs.detach().clone()); acts.append(a)
+                if self._done(step_out[2], step_out[3]):
+                    break
+            if len(frames) < need + 1:
+                continue
+
+            real_xy = [(None, None)] + [_ball_xy(chw(frames[t]), chw(frames[t - 1])) for t in range(1, len(frames))]
+            real_positions.extend([p for p in real_xy if p[0] is not None])
+
+            wm.obs_buffer = torch.stack(frames[start - n_cond:start], dim=1).to(dev)
+            wm.act_buffer = torch.stack(acts[start - n_cond:start], dim=1).to(dev)
+            prev_img = chw(frames[start - 1])
+            img_xy = []
+            for k in range(horizon):
+                t = start + k
+                wm.act_buffer[:, -1] = acts[t - 1]
+                imagined, _ = wm.predict_next_obs()
+                wm.obs_buffer = wm.obs_buffer.roll(-1, dims=1)
+                wm.act_buffer = wm.act_buffer.roll(-1, dims=1)
+                wm.obs_buffer[:, -1] = imagined
+                inp = chw(imagined)
+                img_xy.append(_ball_xy(inp, prev_img)); prev_img = inp
+            img_pts_all.append(img_xy)
+            real_pts_all.append([real_xy[start + k] for k in range(horizon)])
+
+        if not img_pts_all:
+            return {"game": GAME, "model": "DIAMOND", "policy": policy,
+                    "metric": "ball_drift_px", "error": "no full-length trajectories"}
+
+        pts = np.array([[x, y] for (x, y) in real_positions], dtype=float)
+        rng = np.random.default_rng(0)
+        if len(pts) >= 2:
+            i, j = rng.integers(0, len(pts), 5000), rng.integers(0, len(pts), 5000)
+            ceiling = float(np.mean(np.hypot(pts[i, 0] - pts[j, 0], pts[i, 1] - pts[j, 1])))
+        else:
+            ceiling = float("nan")
+
+        H = horizon
+        drift = np.full((len(img_pts_all), H), np.nan)
+        lost = np.zeros(H)
+        for tr in range(len(img_pts_all)):
+            for k in range(H):
+                ix, iy = img_pts_all[tr][k]
+                rx, ry = real_pts_all[tr][k]
+                if rx is None:
+                    continue
+                if ix is None:
+                    drift[tr, k] = ceiling      # dream lost the ball -> maximal drift
+                    lost[k] += 1
+                else:
+                    drift[tr, k] = float(np.hypot(ix - rx, iy - ry))
+        mean_drift = np.array([np.nanmean(drift[:, k]) if np.any(~np.isnan(drift[:, k])) else np.nan
+                               for k in range(H)])
+        floor_idx = next((k for k in range(H) if not np.isnan(mean_drift[k])), None)
+        floor = float(mean_drift[floor_idx]) if floor_idx is not None else float("nan")
+        thresh = floor + 0.5 * (ceiling - floor)
+        cross = next((k + 1 for k in range((floor_idx or 0), H)
+                      if not np.isnan(mean_drift[k]) and mean_drift[k] >= thresh), None)
+        return {
+            "game": GAME, "model": "DIAMOND", "policy": policy, "metric": "ball_drift_px",
+            "n_traj_used": len(img_pts_all), "horizon": horizon, "fire": fire,
+            "one_step_ball_drift_px": round(floor, 2),
+            "random_pair_ceiling_px": round(ceiling, 2),
+            "half_decorrelation_step": cross,
+            "ball_drift_curve": [round(float(v), 2) if not np.isnan(v) else None for v in mean_drift],
+            "imagined_ball_lost_rate": [round(float(x) / len(img_pts_all), 2) for x in lost],
+        }
 
 @app.local_entrypoint()
 def smoke(horizon: int = 80):
@@ -478,6 +612,20 @@ def fidelity(n_traj: int = 8, horizon: int = 60, policy: str = "both"):
         }
     else:
         out = wm.fidelity.remote(n_traj=n_traj, horizon=horizon, policy=policy)
+    print(json.dumps(out, indent=2))
+
+
+@app.local_entrypoint()
+def fidelity_ball(n_traj: int = 24, horizon: int = 60, policy: str = "both"):
+    import json
+    wm = DreamEval()
+    if policy == "both":
+        out = {
+            "greedy": wm.fidelity_ball.remote(n_traj=n_traj, horizon=horizon, policy="greedy"),
+            "random": wm.fidelity_ball.remote(n_traj=n_traj, horizon=horizon, policy="random"),
+        }
+    else:
+        out = wm.fidelity_ball.remote(n_traj=n_traj, horizon=horizon, policy=policy)
     print(json.dumps(out, indent=2))
 
 

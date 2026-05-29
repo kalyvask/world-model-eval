@@ -1,171 +1,117 @@
 # world-model-eval
 
-Experiments on an open generative **world model** (DIAMOND — a diffusion world
-model that generates a playable Atari environment frame by frame), run headless
-on Modal. Sibling to [`inside-the-agent`](../inside-the-agent).
+An evaluation of what open, **small world models** can and can't do. A world
+model is a network that imagines an environment frame by frame: give it the last
+few frames plus an action and it generates the next frame, so an agent can "play"
+inside its dream. Here: DIAMOND (diffusion) and IRIS (transformer) on Atari
+Breakout, run headless on Modal. Sibling to [`inside-the-agent`](../inside-the-agent).
 
-## What this is, in plain terms
+## TL;DR — strong state estimators, weak simulators
 
-A **world model** is a neural network that learns to *imagine* an environment:
-give it the last few frames of a game plus an action and it generates the next
-frame, so an agent can "play" entirely inside the model's dream. The promise for
-AI is that if the dream is accurate, you could train and test agents inside it
-instead of in the slow, expensive real world.
+- **Decode works.** The true ball position is linearly readable from the world
+  model's activations at **R²≈0.78** (ground-truth labels, leakage-free split),
+  and 1-step prediction is near-perfect (frame error 0.0020 ≈ the 0.0022 natural
+  frame-to-frame change).
+- **Simulation has a cliff.** Free-running, the dream keeps the ball within ~6px
+  of truth for **60 on-policy steps**, but off-policy it loses the ball by
+  **~16–20 steps**. DIAMOND (16) and IRIS (20) land close in comparable units, so
+  the off-policy cliff is roughly architecture-independent at this scale.
+- **So use them accordingly.** A small world model is a good tool for **state
+  estimation and short-horizon, on-policy rollout**, and a poor one for **policy
+  ranking or long-horizon / off-policy planning**. The ball-drift metric here
+  locates that cliff for any new model.
+- **Two downstream failures, one root cause.** Imagined return does **not** rank
+  policies (Spearman ≈ 0), and the decoded state direction does **not** steer the
+  ball (decode ≫ steer). Both sit past the fidelity cliff.
 
-This repo asks a simple question of a small open world model (DIAMOND, playing
-Atari Breakout): how long does the dream stay true to reality? It predicts the
-*next* frame almost perfectly, but once it runs on its own the dream drifts off
-within ~10 to 30 steps, and faster when the agent takes unusual actions. That
-single gap (great for one step, unreliable over many) decides what the model is
-good for. Reading the current game state works (ball position R²≈0.78).
-Simulating far enough ahead to rank policies or plan does not.
+![Decoded-state fidelity: open world models track the ball, then lose it off-policy](artifacts/fidelity_ball.png)
 
-**Why it matters.** Most "imagination-based" AI assumes you can roll a world
-model forward for many steps: to dream training episodes, to plan, or to cheaply
-evaluate policies. These bug-checked measurements show that for a small open
-model the trustworthy horizon is short, and shortest exactly when the agent acts
-off its usual policy, which is when a planner would lean on it most. This does
-not refute methods like DreamerV3 (which keep imagination short and in a compact
-latent space for this very reason); it pins the limit down concretely and
-separates two things that get lumped together: predicting one step (works)
-versus simulating many (bounded).
+*Imagined-vs-true ball drift, normalized to each run's random-frame ceiling.
+On-policy (solid blue) the dream tracks the ball for 60 steps; off-policy DIAMOND
+(dashed blue) and IRIS (red) both half-decorrelate at ~16–20 steps. Measured in
+ball pixels, which is comparable across architectures unlike raw pixel L1.*
 
-## The fidelity horizon: near-perfect 1-step, short and policy-dependent
+## In plain terms
 
-Free-running DIAMOND's dream from a real trajectory's context under the same
-actions as the real env: the **one-step prediction error is 0.0020** (≈ the
-natural consecutive-frame change of 0.0022 — near-perfect), but free-running
-**half-decorrelates within tens of steps, and how fast depends on the policy**:
-~30 steps under the agent's own greedy policy (68% bootstrap CI [30, 34]) vs
-**~10 under random actions** ([7, 14]), non-overlapping over 24 trajectories. So
-the horizon is real but it's an *in-distribution* number, not a constant.
+The promise of world models is that if a model can dream an environment
+accurately, you can train and test agents inside the dream instead of the slow,
+expensive real world. The catch is *how long the dream stays true*. This repo
+measures exactly that, and finds the dream is excellent for one step and for
+reading the current state, but drifts off within tens of steps once it runs on
+its own (and faster when the agent does something unusual). That gap is the whole
+story: it decides what the model is good for.
 
-The model decodes instantaneous state cleanly but neither sustains nor controls it:
+## Fidelity: predict vs simulate
 
-- **Decode works** (ball-position R²≈0.78 [0.72, 0.82], ground-truth real-frame
-  labels + leakage-free time-split): one faithful frame is enough; 1-step
-  fidelity is excellent.
-- **Multi-step policy evaluation fails**: it needs *sustained* fidelity, but the
-  dream decorrelates within ~30 steps (DreamEval's imagined reward saturates by
-  ~20–30 — the same horizon).
-- **Steering fails too** (decode ≫ steer): the decoded ball direction moves the
-  ball no more than a matched-norm random direction — bug-checked, it holds even
-  injected post-normalization. See [`docs/steering_study.md`](docs/steering_study.md).
+The headline uses **ball drift** (how far the imagined ball is from the true
+ball), because it weights the signal that matters and is comparable across
+DIAMOND's continuous frames and IRIS's discrete VQ-VAE frames.
 
-Code: `app_eval.py::fidelity`.
+A coarser whole-frame **L1** view (`artifacts/fidelity_horizon.png`) is
+consistent but easy to misread: L1 is dominated by the static Breakout
+background, so it *overstates* decoherence (it counts bricks, paddle and
+rendering, not just the ball) and is not comparable across the two frame types.
+In L1, DIAMOND's free-run half-decorrelates at ~30 on-policy steps and ~10
+off-policy (sustained crossing + bootstrap CIs). An earlier version of this repo
+read those L1 numbers as a *universal* ~30-step horizon "across architecture and
+scale"; that was a confound (mismatched action policies, a noise-sensitive
+crossing, and L1's frame-type incomparability). The ball-drift metric above is
+the corrected, fair comparison, and it says something narrower and sturdier: the
+on-policy dream tracks state well for tens of steps, and the off-policy cliff is
+similar (~16–20 steps) across the two architectures.
 
-### Does the horizon generalize across architecture and scale? No.
+Code: `app_eval.py::fidelity` (L1) and `::fidelity_ball` (ball drift);
+`app_iris.py` for the IRIS port.
 
-Running the same measurement on **IRIS** (a VQ-VAE + Transformer world model,
-several times larger than DIAMOND's 4.4M diffusion core) under a **matched
-random-action protocol**: DIAMOND half-decorrelates by step **10** [7, 14], but
-IRIS only reaches a *sustained* half-decorrelation at step **58** [21, 60] (10%
-of bootstrap resamples never cross within 60 steps). Not identical.
-
-Two things make a "universal ~30-step constant" untenable: the horizon is
-policy-dependent (above), and **L1 frame divergence isn't comparable across the
-two frame types** — IRIS's discrete VQ-VAE frames stay crisp and low-L1 even
-when semantically wrong, while DIAMOND's continuous diffusion frames blur and
-drift. Honest read: each model has its own policy-dependent fidelity horizon;
-there is no shared ~30-step number. Code: `app_iris.py::fidelity`. (Both are
-small/medium Atari models.)
-
-![Fidelity horizon is policy- and model-dependent, not a universal ~30 steps](artifacts/fidelity_horizon.png)
-
-*Each curve normalized to its own floor-to-ceiling (0 = 1-step error, 1 = that
-run's decorrelated reference). Under a matched random-action protocol DIAMOND
-(dashed) crosses half-decorrelation at ~10 and IRIS (red) only at the noisy edge
-of the 60-step window; DIAMOND's "~30" (solid) holds only under its own greedy
-policy. The earlier "DIAMOND ~30 ≈ IRIS ~31" compared mismatched policies with a
-noise-sensitive first-touch crossing.*
-
----
-
-The same DIAMOND-on-Modal infrastructure powers the applied study below,
-explained by the fidelity horizon above:
-
-### DreamEval — world model as a cheap policy evaluator
+## DreamEval — world model as a cheap policy evaluator
 
 **Can the world model's *imagined* return rank policies the way the real env
-does?** Score a spectrum of policies by imagined return (rolled out inside the
-world model, scored by its reward model) and measure the correlation with real
-return in the actual Atari env. The canonical applied use-case for world models
-(policy evaluation without expensive real trials), validated on Atari.
+does?** Score a spectrum of epsilon-greedy policies by imagined return (rolled
+out inside the world model, scored by its reward model) and correlate with real
+return in the actual Atari env. This is the canonical applied use-case: policy
+evaluation without expensive real trials.
 
-**Result (DIAMOND-Breakout): imagined return is *not* a reliable policy
-evaluator here.** Across an epsilon-greedy spectrum (eps 0 = good → 1 = random),
-real return falls cleanly (8.9 → 1.7) but imagined return stays **flat at ~0.4
-regardless of policy quality** (random ≈ good). The rank correlation is sample-
-fragile: at 7 coarse policies it looks promising (Spearman 0.78, p=0.04) but
-that is driven by the good-vs-random extremes + small n — on a **finer 13-policy
-grid it collapses to near zero (Spearman 0.22, then 0.01 on a bug-checked
-re-run; both p≫0.1)**. The dream's imagined reward
-**saturates by ~20–30 steps** (the rollout goes inert after the ball is lost),
-so it captures only the coarsest good-vs-random distinction, not a usable
-ranking.
+**Result (DIAMOND-Breakout): no.** Real return falls cleanly across the spectrum
+(8.9 → 1.7) but imagined return stays **flat at ~0.4 regardless of policy
+quality** (random ≈ good). The rank correlation is sample-fragile: 7 coarse
+policies look promising (Spearman 0.78, p=0.04), driven by the good-vs-random
+extremes and small n, but a **13-policy grid collapses to ≈ 0 (Spearman 0.22,
+then 0.01 on a bug-checked re-run; both p≫0.1)**. Mechanism: the dream loses the
+ball by ~16–20 steps (above) and imagined reward saturates by ~step 50, so a good
+policy's real edge — sustained play over hundreds of steps — accrues *past* the
+fidelity cliff, where the dream can't see it.
 
 ![Imagined vs real return across the 13-policy spectrum; imagined return is flat](artifacts/dreameval_scatter.png)
 
-*Real return falls cleanly from 8.9 to 1.7 across the epsilon spectrum (color),
-but imagined return stays flat at ~0.4 regardless of policy quality. Spearman
-0.01 (p=0.96) at 13 policies: no usable ranking signal.*
-
-Takeaway: a small open world model decodes state well (ball-position R²≈0.78)
-but its imagined rollouts are too low-fidelity to rank policies at fine
-resolution. It **decodes but does not faithfully *simulate***.
+*Real return spans 1.7–8.9 across the epsilon spectrum (color); imagined return
+is flat at ~0.4. Spearman 0.01 (p=0.96) at 13 policies: no usable ranking signal.*
 
 Code: `modal_deploy/app_eval.py` · plan: [`BUILD_PLAN.md`](BUILD_PLAN.md)
 
----
+## Steering — decode ≫ steer
 
-## Limitations
+Game state is linearly **decodable** from the UNet activations (R²≈0.78), but
+adding that decoded ball direction back does **not** move the ball more than a
+matched-norm *random* direction does — bug-checked, it holds even when injected
+post-normalization. Decoding a state is not the same as having a causal handle on
+it. See [`docs/steering_study.md`](docs/steering_study.md).
 
-A careful but small-scale study; the bug-checked numbers carry real caveats.
+## Scope
 
-- **Window-relative horizons.** The half-decorrelation step is normalized to
-  each run's floor-to-ceiling (ceiling = L1 between real frames `horizon` apart).
-  Greedy first-touch is stable (~30 at windows of 30/60/120), but the *sustained*
-  crossing drifts (30→68) and the *random*-policy crossing slides 5→10→22 with
-  the window (its curve never plateaus), so the off-policy "horizon" is only
-  loosely defined.
-- **L1 isn't comparable across frame types.** IRIS's discrete VQ-VAE frames stay
-  crisp/low-L1 even when wrong; DIAMOND's diffusion frames blur. The
-  cross-architecture comparison is directional, not a calibrated metric.
-- **L1 is dominated by the static background.** Breakout is mostly unchanging
-  pixels (walls, bricks, score), so whole-frame L1 is small in absolute terms
-  and the signal of interest (the few ball/paddle pixels) is a tiny fraction;
-  the absolute divergences are small and a little noisy. A decoded-state
-  (ball-position) divergence would weight the thing that matters directly and be
-  comparable across architectures.
-- **CV-detector measurement.** Ball position comes from a frame-differencing
-  detector. The ground-truth probe (`probe_truth`, real-frame labels) sidesteps
-  it for decode, but the steering outcome still uses it and conflates frame
-  degradation with motion under large perturbations. Paddle decode is degenerate
-  (constant label) and is dropped.
-- **Decode is rollout-sensitive.** On generated frames ball_x R² ranged 0.73–0.91
-  across rollouts; the headline 0.78 [0.72, 0.82] is the ground-truth, leakage-
-  free time split (n≈357).
-- **Small samples, single game.** Breakout only; 16–24 fidelity trajectories, 13
-  policies for DreamEval; both world models are small/medium Atari-100k models.
-  Since DIAMOND was trained on the agent's own near-greedy data, the greedy
-  horizon is a best case by construction (off-policy is both rarer in training
-  and where the dream decoheres fastest).
-- **DreamEval mechanism.** The flat imagined return is attributed to fidelity
-  decay (imagined reward saturates by ~50 steps); we have not separated
-  reward-model error from dynamics error (a teacher-forced reward check would).
+Breakout only; DIAMOND (4.4M) and IRIS are small/medium Atari-100k models, and
+DIAMOND was trained on the agent's own near-greedy data (so the greedy horizon is
+a best case). Ball position comes from a frame-diff CV detector; the decode
+number sidesteps it with ground-truth real-frame labels, but the steering outcome
+still uses it. A frontier-scale test (closed models like Genie) is not possible
+here. Numbers are bug-checked: leakage-free decode with a bootstrap CI, sustained
+fidelity crossings with CIs, matched action protocols, and a frame-type-fair
+(ball-drift) metric for the cross-architecture comparison.
 
----
+Infra: DIAMOND on Modal L40S, IRIS on A100 — hydra load + `eval` resolver,
+`make_atari_env`, seeded `WorldModelEnv` (collect real ALE frames → imagine under
+the agent's policy). Tiny 4.4M-param DIAMOND denoiser; cheap to run.
 
-Infra: DIAMOND on Modal L40S — hydra load + `eval` resolver,
-`make_atari_env`, seeded `WorldModelEnv` (collect real ALE frames → imagine
-under the agent's policy). Tiny 4.4M-param denoiser; cheap to run.
-
-Status: DreamEval E1–E3 done. Strengthening (more rollouts, then a 13-policy
-grid) reversed the n=7 positive: imagined return does not reliably rank policies
-(Spearman near zero, p≫0.1 at 13 policies). Honest negative; decode ≫ simulate.
-
-Headline numbers are bug-checked: decode R² uses ground-truth real-frame labels
-+ a leakage-free time split with a bootstrap CI; the fidelity crossing uses a
-sustained metric + bootstrap CI and is reported across action policies and
-window lengths; and the cross-architecture comparison uses a matched action
-protocol — which removed an earlier, confounded "~30 ≈ ~31" claim. See Limitations.
+Status: decode ≫ simulate, bug-checked end to end. Decode R²≈0.78 (ground-truth,
+leakage-free); fidelity measured in both L1 and a frame-type-fair ball-drift
+metric (on-policy tracks ~60 steps; off-policy cliff ~16–20, similar across
+DIAMOND and IRIS); imagined return does not rank policies (Spearman ≈ 0).
