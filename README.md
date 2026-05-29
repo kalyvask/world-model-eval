@@ -14,9 +14,9 @@ free-running drifts to **half-decorrelated by ~30 steps** (decorrelated ceiling
 
 - **Decode works** (state R²=0.89): instantaneous state needs only one faithful
   frame, and 1-step fidelity is excellent.
-- **Steering and multi-step policy evaluation fail**: both need *sustained*
-  fidelity, but the dream half-decorrelates by ~30 steps (and DreamEval's
-  imagined reward saturates by ~20–30 steps — the same horizon).
+- **Multi-step policy evaluation fails**: it needs *sustained* fidelity, but
+  the dream half-decorrelates by ~30 steps (and DreamEval's imagined reward
+  saturates by ~20–30 steps — the same horizon).
 
 **A small open world model decodes instantaneous state well but its ~30-step
 fidelity horizon bounds which use-cases work.** Code: `app_eval.py::fidelity`.
@@ -41,10 +41,10 @@ decorrelation at step 30, IRIS (transformer, several times larger) at step 31.*
 
 ---
 
-Two studies share the same DIAMOND-on-Modal infrastructure, both explained by
-the fidelity horizon above:
+The same DIAMOND-on-Modal infrastructure powers the applied study below,
+explained by the fidelity horizon above:
 
-### 1. DreamEval — world model as a cheap policy evaluator (current)
+### DreamEval — world model as a cheap policy evaluator
 
 **Can the world model's *imagined* return rank policies the way the real env
 does?** Score a spectrum of policies by imagined return (rolled out inside the
@@ -69,28 +69,15 @@ ranking.
 but imagined return stays flat at ~0.4 regardless of policy quality. Spearman
 0.22 (p=0.47) at 13 policies: no usable ranking signal.*
 
-Takeaway: a small open world model decodes state well but its imagined rollouts
-are too low-fidelity to rank policies at fine resolution. Combined with the
-steering study below, the repo is a two-sided study of the **limits of a small
-world model: it decodes (R²=0.89) but does not faithfully *simulate*** — neither
-clean steering nor reliable policy evaluation holds.
+Takeaway: a small open world model decodes state well (R²=0.89) but its
+imagined rollouts are too low-fidelity to rank policies at fine resolution. It
+**decodes but does not faithfully *simulate***.
 
 Code: `modal_deploy/app_eval.py` · plan: [`BUILD_PLAN.md`](BUILD_PLAN.md)
 
-### 2. Steering study — decode ≫ steer (done)
-
-Interpretability + steering of the world model. **Finding:** game state is
-linearly **decodable** from the UNet activations (ball position R² = 0.89) but
-**not cleanly steerable** — adding the probe/contrastive direction moves the
-ball about as much as a matched-norm *random* direction does. The same
-decode ≫ steer pattern holds in the sibling `inside-the-agent` (LLM agent).
-
-Code: `modal_deploy/app_diamond.py` · plan + results:
-[`docs/steering_study.md`](docs/steering_study.md)
-
 ---
 
-Infra (both studies): DIAMOND on Modal L40S — hydra load + `eval` resolver,
+Infra: DIAMOND on Modal L40S — hydra load + `eval` resolver,
 `make_atari_env`, seeded `WorldModelEnv` (collect real ALE frames → imagine
 under the agent's policy). Tiny 4.4M-param denoiser; cheap to run.
 
