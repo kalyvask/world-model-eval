@@ -40,12 +40,16 @@ testbed** — real rollouts are cheap here, so we use them as ground truth. We d
 
 ## Phases
 
-- **E1 — load + both return functions** (`app_eval.py`): reuse the proven
-  DIAMOND load; `smoke` = good (eps0) vs random (eps1) in real + dream; good
-  should beat random in both, else add/adjust FIRE burn-in. ← here.
-- **E2 — the experiment:** sweep the epsilon spectrum; Spearman/Pearson + scatter.
-- **E3 — horizon + cost:** correlation vs imagined H; step-count/wall-clock of
-  imagined vs real eval.
+- **E1 — load + both return functions** ✅ (`app_eval.py`): pipeline runs;
+  real env ranks correctly (good 2.0 > random 0.0). FIRE burn-in launches the
+  ball in both real and dream.
+- **E2 — the experiment** ✅: epsilon spectrum (0→1). Real return falls
+  monotonically 8.8→1.4; imagined return ranks it at **Spearman 0.78 (p=0.04),
+  Pearson 0.81** (n=7; 16 imagined rollouts × H=120 vs 5 real × 300). Signal is
+  in the ranking, not magnitude (sparse reward compresses imagined returns).
+- **E3 — strengthen + horizon/cost:** more rollouts + longer H for a tighter
+  correlation and a clean scatter; correlation vs imagined H (fidelity decay);
+  step-count/wall-clock of imagined vs real eval.
 - **E4 — writeup + chart.**
 
 ## Honesty guardrails
