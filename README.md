@@ -4,6 +4,32 @@ Experiments on an open generative **world model** (DIAMOND — a diffusion world
 model that generates a playable Atari environment frame by frame), run headless
 on Modal. Sibling to [`inside-the-agent`](../inside-the-agent).
 
+## What this is, in plain terms
+
+A **world model** is a neural network that learns to *imagine* an environment:
+give it the last few frames of a game plus an action and it generates the next
+frame, so an agent can "play" entirely inside the model's dream. The promise for
+AI is that if the dream is accurate, you could train and test agents inside it
+instead of in the slow, expensive real world.
+
+This repo asks a simple question of a small open world model (DIAMOND, playing
+Atari Breakout): how long does the dream stay true to reality? It predicts the
+*next* frame almost perfectly, but once it runs on its own the dream drifts off
+within ~10 to 30 steps, and faster when the agent takes unusual actions. That
+single gap (great for one step, unreliable over many) decides what the model is
+good for. Reading the current game state works (ball position R²≈0.78).
+Simulating far enough ahead to rank policies or plan does not.
+
+**Why it matters.** Most "imagination-based" AI assumes you can roll a world
+model forward for many steps: to dream training episodes, to plan, or to cheaply
+evaluate policies. These bug-checked measurements show that for a small open
+model the trustworthy horizon is short, and shortest exactly when the agent acts
+off its usual policy, which is when a planner would lean on it most. This does
+not refute methods like DreamerV3 (which keep imagination short and in a compact
+latent space for this very reason); it pins the limit down concretely and
+separates two things that get lumped together: predicting one step (works)
+versus simulating many (bounded).
+
 ## The fidelity horizon: near-perfect 1-step, short and policy-dependent
 
 Free-running DIAMOND's dream from a real trajectory's context under the same
