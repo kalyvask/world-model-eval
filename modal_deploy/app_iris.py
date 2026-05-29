@@ -43,6 +43,65 @@ hf_volume = modal.Volume.from_name("hf-cache", create_if_missing=True)
 GAME = "Breakout"
 
 
+def _fidelity_stats(all_div, ceil_diffs, n_boot=2000, seed=0):
+    """Floor/ceiling-normalized half-decorrelation step from per-trajectory
+    divergence curves (n_traj x horizon) + per-traj decorrelated-ceiling diffs.
+    Matches app_eval.py::_fidelity_stats so DIAMOND and IRIS are scored
+    identically. Reports first-touch, sustained, and smoothed crossings plus a
+    bootstrap 68% CI over trajectories; boot_frac_never_crosses high => the
+    crossing is unreliable / the dream barely decorrelates within the window.
+    """
+    import numpy as np
+
+    div = np.array(all_div, dtype=float)            # (n_traj, horizon)
+    ceil_arr = np.array(ceil_diffs, dtype=float)
+    n_traj, H = div.shape
+    mean_div = div.mean(0)
+    floor = float(mean_div[0])
+    ceiling = float(ceil_arr.mean())
+
+    def first_cross(curve, thr):
+        for k, v in enumerate(curve):
+            if v >= thr:
+                return k + 1
+        return None
+
+    def sustained_cross(curve, thr):
+        for k in range(len(curve)):
+            if all(curve[j] >= thr for j in range(k, len(curve))):
+                return k + 1
+        return None
+
+    thresh = floor + 0.5 * (ceiling - floor)
+    cross_first = first_cross(mean_div, thresh)
+    cross_sustained = sustained_cross(mean_div, thresh)
+    sm = np.convolve(mean_div, np.ones(3) / 3.0, mode="same")
+    cross_smoothed = first_cross(sm, thresh)
+
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        ix = rng.integers(0, n_traj, n_traj)
+        md = div[ix].mean(0)
+        fl, ce = float(md[0]), float(ceil_arr[ix].mean())
+        c = first_cross(md, fl + 0.5 * (ce - fl))
+        boots.append(c if c is not None else H + 1)  # "never crosses" -> beyond window
+    boots = np.array(boots, dtype=float)
+    ci_lo, ci_hi = int(np.percentile(boots, 16)), int(np.percentile(boots, 84))
+    frac_no_cross = round(float((boots > H).mean()), 3)
+
+    return {
+        "one_step_error": round(floor, 4),
+        "decorrelated_ceiling": round(ceiling, 4),
+        "half_decorrelation_step": cross_first,
+        "half_decorrelation_step_sustained": cross_sustained,
+        "half_decorrelation_step_smoothed": cross_smoothed,
+        "half_decorrelation_ci68": [ci_lo, ci_hi],
+        "boot_frac_never_crosses": frac_no_cross,
+        "divergence_curve": [round(float(v), 4) for v in mean_div],
+    }
+
+
 @app.cls(
     image=image,
     gpu="A100-40GB",  # torch 1.11 supports sm_80; L40S (sm_89) is too new for it
@@ -221,20 +280,13 @@ class IrisWorldModel:
 
         if not all_div:
             return {"game": GAME, "model": "IRIS", "error": "no full-length trajectories", "n_traj": n_traj}
-        div = np.array(all_div)
-        mean_div = div.mean(0)
-        floor = float(mean_div[0])
-        ceiling = float(np.mean(ceil_diffs))
-        thresh = floor + 0.5 * (ceiling - floor)
-        cross = next((k + 1 for k, v in enumerate(mean_div) if v >= thresh), None)
-        return {
-            "game": GAME, "model": "IRIS", "n_traj_used": len(all_div), "horizon": horizon,
-            "one_step_error": round(floor, 4),
+        stats = _fidelity_stats(all_div, ceil_diffs)
+        stats.update({
+            "game": GAME, "model": "IRIS", "policy": "random",
+            "n_traj_used": len(all_div), "horizon": horizon,
             "real_consecutive_frame_diff": round(float(np.mean(real_consec)), 4),
-            "decorrelated_ceiling": round(ceiling, 4),
-            "half_decorrelation_step": cross,
-            "divergence_curve": [round(float(v), 4) for v in mean_div],
-        }
+        })
+        return stats
 
 
 @app.local_entrypoint()

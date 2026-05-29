@@ -4,45 +4,53 @@ Experiments on an open generative **world model** (DIAMOND — a diffusion world
 model that generates a playable Atari environment frame by frame), run headless
 on Modal. Sibling to [`inside-the-agent`](../inside-the-agent).
 
-## The unifying result: a ~30-step fidelity horizon
+## The fidelity horizon: near-perfect 1-step, short and policy-dependent
 
-Free-running the dream from a real trajectory's context under the same actions
-as the real env, frame divergence shows: the **one-step prediction error is
-0.0020** (≈ the natural consecutive-frame change of 0.0022 — near-perfect), but
-free-running drifts to **half-decorrelated by ~30 steps** (decorrelated ceiling
-0.0075). The model decodes instantaneous state cleanly but neither sustains nor
-controls it:
+Free-running DIAMOND's dream from a real trajectory's context under the same
+actions as the real env: the **one-step prediction error is 0.0020** (≈ the
+natural consecutive-frame change of 0.0022 — near-perfect), but free-running
+**half-decorrelates within tens of steps, and how fast depends on the policy**:
+~30 steps under the agent's own greedy policy (68% bootstrap CI [30, 34]) vs
+**~10 under random actions** ([7, 14]), non-overlapping over 24 trajectories. So
+the horizon is real but it's an *in-distribution* number, not a constant.
 
-- **Decode works** (state R²=0.89): instantaneous state needs only one faithful
-  frame, and 1-step fidelity is excellent.
-- **Multi-step policy evaluation fails**: it needs *sustained* fidelity, but
-  the dream half-decorrelates by ~30 steps (and DreamEval's imagined reward
-  saturates by ~20–30 steps — the same horizon).
+The model decodes instantaneous state cleanly but neither sustains nor controls it:
+
+- **Decode works** (ball-position R²≈0.73, leakage-corrected time-split): one
+  faithful frame is enough; 1-step fidelity is excellent.
+- **Multi-step policy evaluation fails**: it needs *sustained* fidelity, but the
+  dream decorrelates within ~30 steps (DreamEval's imagined reward saturates by
+  ~20–30 — the same horizon).
 - **Steering fails too** (decode ≫ steer): the decoded ball direction moves the
-  ball no more than a matched-norm random direction — bug-checked (it holds even
-  when injected post-normalization). See
-  [`docs/steering_study.md`](docs/steering_study.md).
+  ball no more than a matched-norm random direction — bug-checked, it holds even
+  injected post-normalization. See [`docs/steering_study.md`](docs/steering_study.md).
 
-**A small open world model decodes instantaneous state well but its ~30-step
-fidelity horizon bounds which use-cases work.** Code: `app_eval.py::fidelity`.
+Code: `app_eval.py::fidelity`.
 
-**It's not a DIAMOND quirk — it holds across architecture and scale.** Running
-the same measurement on **IRIS** (a VQ-VAE + Transformer world model, several
-times larger than DIAMOND's 4.4M diffusion core) gives a half-decorrelation
-step of **~31 — essentially identical to DIAMOND's ~30**, despite a completely
-different architecture. (IRIS's absolute per-frame divergences are smaller —
-sharper VQ-VAE frames — but the horizon, measured relative to each model's own
-floor→ceiling, matches.) So the short fidelity horizon generalizes across
-diffusion vs autoregressive-transformer and a meaningful scale step. Code:
-`app_iris.py::fidelity`. (Caveat: both are small/medium Atari models; a
-frontier-scale test would need closed models like Genie.)
+### Does the horizon generalize across architecture and scale? No.
 
-![World-model fidelity horizon: DIAMOND and IRIS both half-decorrelate at ~30 steps](artifacts/fidelity_horizon.png)
+Running the same measurement on **IRIS** (a VQ-VAE + Transformer world model,
+several times larger than DIAMOND's 4.4M diffusion core) under a **matched
+random-action protocol**: DIAMOND half-decorrelates by step **10** [7, 14], but
+IRIS only reaches a *sustained* half-decorrelation at step **58** [21, 60] (10%
+of bootstrap resamples never cross within 60 steps). Not identical.
 
-*Each curve is normalized to its own floor-to-ceiling (0 = one-step error,
-1 = decorrelated), so the absolute scale difference between the two models is
-removed and only the horizon is compared. DIAMOND (diffusion) crosses half-
-decorrelation at step 30, IRIS (transformer, several times larger) at step 31.*
+Two things make a "universal ~30-step constant" untenable: the horizon is
+policy-dependent (above), and **L1 frame divergence isn't comparable across the
+two frame types** — IRIS's discrete VQ-VAE frames stay crisp and low-L1 even
+when semantically wrong, while DIAMOND's continuous diffusion frames blur and
+drift. Honest read: each model has its own policy-dependent fidelity horizon;
+there is no shared ~30-step number. Code: `app_iris.py::fidelity`. (Both are
+small/medium Atari models.)
+
+![Fidelity horizon is policy- and model-dependent, not a universal ~30 steps](artifacts/fidelity_horizon.png)
+
+*Each curve normalized to its own floor-to-ceiling (0 = 1-step error, 1 = that
+run's decorrelated reference). Under a matched random-action protocol DIAMOND
+(dashed) crosses half-decorrelation at ~10 and IRIS (red) only at the noisy edge
+of the 60-step window; DIAMOND's "~30" (solid) holds only under its own greedy
+policy. The earlier "DIAMOND ~30 ≈ IRIS ~31" compared mismatched policies with a
+noise-sensitive first-touch crossing.*
 
 ---
 
@@ -74,9 +82,9 @@ ranking.
 but imagined return stays flat at ~0.4 regardless of policy quality. Spearman
 0.22 (p=0.47) at 13 policies: no usable ranking signal.*
 
-Takeaway: a small open world model decodes state well (R²=0.89) but its
-imagined rollouts are too low-fidelity to rank policies at fine resolution. It
-**decodes but does not faithfully *simulate***.
+Takeaway: a small open world model decodes state well (ball-position R²≈0.73)
+but its imagined rollouts are too low-fidelity to rank policies at fine
+resolution. It **decodes but does not faithfully *simulate***.
 
 Code: `modal_deploy/app_eval.py` · plan: [`BUILD_PLAN.md`](BUILD_PLAN.md)
 
@@ -89,3 +97,8 @@ under the agent's policy). Tiny 4.4M-param denoiser; cheap to run.
 Status: DreamEval E1–E3 done. Strengthening (more rollouts, then a 13-policy
 grid) reversed the n=7 positive: imagined return does not reliably rank policies
 (Spearman 0.22, p=0.47 at 13 policies). Honest negative; decode ≫ simulate.
+
+Headline numbers are bug-checked: decode R² is leakage-corrected (time-ordered
+split, not random), the fidelity crossing uses a sustained metric + bootstrap CI
+over trajectories, and the cross-architecture comparison uses a matched
+action protocol — which removed an earlier, confounded "~30 ≈ ~31" claim.

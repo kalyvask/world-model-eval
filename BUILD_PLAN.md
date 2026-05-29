@@ -51,15 +51,18 @@ testbed** — real rollouts are cheap here, so we use them as ground truth. We d
   reward **saturates by ~20–30 steps** (flat horizon curve). **Honest verdict:
   imagined return is NOT a reliable policy evaluator on DIAMOND-Breakout** — the
   n=7 positive was small-n / good-vs-random-extremes fragility.
-- Consolidated: a small world model **decodes** state (R²=0.89, steering study)
-  but does not faithfully **simulate** — neither clean steering nor reliable
-  policy eval holds. Decode ≫ simulate.
+- Consolidated: a small world model **decodes** state (ball_x R²≈0.73,
+  leakage-corrected; steering study) but does not faithfully **simulate** —
+  neither clean steering nor reliable policy eval holds. Decode ≫ simulate.
 - **Capstone — fidelity horizon** (`app_eval.py::fidelity`): free-running the
   dream from a real context under the same actions, one-step error = 0.0020
-  (≈ natural frame change 0.0022, near-perfect) but **half-decorrelated by
-  ~30 steps** (ceiling 0.0075). This ~30-step horizon is the mechanism: it's
-  long enough for one-frame decode, too short for sustained simulation — which
-  is exactly why steering and multi-step eval fail.
+  (≈ natural frame change 0.0022, near-perfect) but **half-decorrelated within
+  tens of steps — ~30 under the agent's greedy policy [CI 30–34], ~10 under
+  random actions [7–14]** (policy-dependent, not a constant). Long enough for
+  one-frame decode, too short for sustained simulation — why steering and
+  multi-step eval fail. It does NOT generalize across architecture: under a
+  matched random protocol IRIS only sustains half-decorrelation at ~58, and L1
+  isn't comparable across DIAMOND's continuous vs IRIS's VQ-VAE frames.
 - **E4 — writeup + chart.**
 
 ## Honesty guardrails

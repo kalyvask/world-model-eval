@@ -68,9 +68,13 @@ richer world (Oasis-Minecraft) the paper didn't cover.
 - P1 ✅ DIAMOND Breakout loads headless on Modal (4.41M-param denoiser, L40S).
 - P2 ✅ seed (real ALE frames) + imagine-step + capture UNet acts (1,64,64,64).
 - P3 ✅ **ball position linearly decodable**: ridge probe on pooled UNet
-  activation, ball_x R²=0.89 / ball_y R²=0.76 (held-out). Driving imagination
-  with the agent's policy + FIRE burn-in was needed for dynamic rollouts;
-  frame-diff CV isolates the moving ball from static bricks.
+  activation, **ball_x R²≈0.73, ball_y R²≈0.50** (held-out, *time-ordered*
+  split). A random split leaks across adjacent rollout frames and inflates these
+  to 0.81 / 0.64 (an earlier run reported 0.89 / 0.76); paddle decode is
+  degenerate here (the CV detector returns a near-constant, so its R² is
+  meaningless). Driving imagination with the agent's policy + FIRE burn-in was
+  needed for dynamic rollouts; frame-diff CV isolates the moving ball from
+  static bricks.
 - P4 ✅ **decode ≫ steer (bug-checked, holds)**: the first pass added the
   direction to the UNet output, but `InnerModel.forward` runs `norm_out`
   (GroupNorm) on the next line — it subtracts the per-group mean and rescales,

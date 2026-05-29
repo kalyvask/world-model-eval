@@ -361,20 +361,33 @@ class DiamondWorldModel:
 
         X = np.asarray(feats, dtype=np.float32)
 
+        def _fit_eval(Xtr, Xte, ytr, yte):
+            n_comp = int(min(128, Xtr.shape[0] - 1, Xtr.shape[1]))
+            pipe = make_pipeline(StandardScaler(), PCA(n_components=n_comp), Ridge(alpha=10.0))
+            pipe.fit(Xtr, ytr)
+            return round(float(r2_score(yte, pipe.predict(Xte))), 3)
+
         def fit(label_list, name):
             y = np.array([v if v is not None else np.nan for v in label_list], dtype=float)
             mask = ~np.isnan(y)
             if mask.sum() < 60:
                 return {"concept": name, "n": int(mask.sum()), "test_r2": None, "note": "too few detections"}
             Xs, ys = X[mask], y[mask]
+            # Random split is LEAKY on a sequential rollout: adjacent frames are
+            # near-duplicates, so a frame's temporal twin lands in the other split
+            # and inflates R^2. The time-ordered split (train on the first 75% of
+            # the rollout, test on the last 25%, order preserved by the mask) is
+            # the honest, leakage-free number. Report both to show the gap.
             Xtr, Xte, ytr, yte = train_test_split(Xs, ys, test_size=0.25, random_state=0)
-            n_comp = int(min(128, Xtr.shape[0] - 1, Xtr.shape[1]))
-            pipe = make_pipeline(StandardScaler(), PCA(n_components=n_comp), Ridge(alpha=10.0))
-            pipe.fit(Xtr, ytr)
+            r2_random = _fit_eval(Xtr, Xte, ytr, yte)
+            n_tr = int(len(Xs) * 0.75)
+            r2_time = (_fit_eval(Xs[:n_tr], Xs[n_tr:], ys[:n_tr], ys[n_tr:])
+                       if (len(Xs) - n_tr) >= 10 else None)
             return {
                 "concept": name,
                 "n": int(mask.sum()),
-                "test_r2": round(float(r2_score(yte, pipe.predict(Xte))), 3),
+                "test_r2_random_split": r2_random,
+                "test_r2_time_split": r2_time,
                 "label_std_px": round(float(ys.std()), 2),
             }
 

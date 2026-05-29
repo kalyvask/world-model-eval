@@ -1,15 +1,16 @@
 """
 Generate the two headline figures for world-model-eval:
-  1. fidelity_horizon.png  — DIAMOND vs IRIS divergence-vs-step, each normalized
-     to its own floor->ceiling, showing both decorrelate at ~30 steps.
-  2. dreameval_scatter.png  — imagined vs real return across the 13-policy
+  1. fidelity_horizon.png  — free-running divergence vs step for three runs,
+     each normalized to its own floor->ceiling: DIAMOND under its greedy policy,
+     DIAMOND under random actions, and IRIS under random actions. Shows the
+     fidelity horizon is policy- and model-dependent (NOT a universal ~30 steps).
+  2. dreameval_scatter.png — imagined vs real return across the 13-policy
      epsilon spectrum, showing imagined return is flat (no ranking signal).
 
-Reads the captured fidelity JSON from data/{diamond,iris}_fid_raw.txt.
-Run locally:  python artifacts/make_charts.py
+Numbers are inlined from the captured runs (raw logs under data/ are gitignored;
+half-decorrelation steps use the sustained-crossing metric with bootstrap 68% CI
+from app_eval.py / app_iris.py::fidelity). Run locally: python artifacts/make_charts.py
 """
-import json
-import re
 from pathlib import Path
 
 import matplotlib
@@ -17,18 +18,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-DATA = ROOT / "data"
-
-
-def extract_json(path: Path) -> dict:
-    """Pull the json.dumps(indent=2) block out of a captured modal-run log."""
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    # the printed block starts with a line that is exactly "{" and ends with "}"
-    m = re.search(r"^\{\s*$.*?^\}\s*$", text, re.DOTALL | re.MULTILINE)
-    if not m:
-        raise ValueError(f"no JSON block found in {path}")
-    return json.loads(m.group(0))
 
 
 # ---- DreamEval 13-policy data (captured from the run; see README) ----
@@ -37,70 +26,69 @@ EVAL_REAL = [8.5, 8.6, 7.8, 7.5, 6.6, 5.8, 5.9, 3.8, 3.0, 4.2, 4.0, 1.8, 1.1]
 EVAL_IMAG = [0.5, 0.375, 0.417, 0.375, 0.5, 0.25, 0.5, 0.375, 0.417, 0.417, 0.292, 0.333, 0.458]
 EVAL_SPEARMAN = 0.22
 
-# ---- Fidelity-horizon data (captured from the runs; see data/*_fid_raw.txt) ----
-# Inlined so this script is self-contained on a fresh clone (the raw run logs
-# under data/ are gitignored). If a raw log is present it takes precedence.
-DIAMOND_FID = {
-    "model": "DIAMOND", "one_step_error": 0.002, "decorrelated_ceiling": 0.0077,
-    "half_decorrelation_step": 30,
-    "divergence_curve": [
-        0.002, 0.002, 0.0029, 0.003, 0.0034, 0.0034, 0.0036, 0.0036, 0.0037, 0.0037,
-        0.0037, 0.0038, 0.0038, 0.0039, 0.0041, 0.0042, 0.0042, 0.0042, 0.0043, 0.0043,
-        0.0044, 0.0047, 0.0046, 0.0047, 0.0047, 0.0047, 0.0047, 0.0047, 0.0047, 0.0062,
-        0.0062, 0.0061, 0.0063, 0.0062, 0.006, 0.0061, 0.0065, 0.0056, 0.0056, 0.0056,
-        0.0056, 0.0056, 0.0057, 0.0057, 0.0057, 0.0057, 0.0057, 0.0058, 0.0057, 0.0058,
-        0.0058, 0.0058, 0.0058, 0.0058, 0.0059, 0.0059, 0.0059, 0.0059, 0.0059, 0.0059,
-    ],
-}
-IRIS_FID = {
-    "model": "IRIS", "one_step_error": 0.0006, "decorrelated_ceiling": 0.0026,
-    "half_decorrelation_step": 31,
-    "divergence_curve": [
-        0.0006, 0.0005, 0.0004, 0.0004, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005,
-        0.0004, 0.0005, 0.0005, 0.0004, 0.0004, 0.0004, 0.0008, 0.0009, 0.0009, 0.0013,
-        0.0013, 0.0014, 0.0013, 0.0014, 0.0014, 0.0013, 0.0013, 0.0014, 0.0014, 0.0014,
-        0.0016, 0.0015, 0.0013, 0.0014, 0.0014, 0.0013, 0.0012, 0.0012, 0.0012, 0.0013,
-        0.0013, 0.0013, 0.0013, 0.0013, 0.0013, 0.0013, 0.0014, 0.0012, 0.0011, 0.0011,
-        0.0011, 0.0011, 0.0011, 0.0011, 0.0013, 0.0014, 0.0013, 0.0016, 0.0017, 0.0019,
-    ],
+# ---- Fidelity-horizon runs (captured; sustained crossing + 68% bootstrap CI) ----
+# Matched random-action protocol for the cross-model comparison; DIAMOND greedy
+# is shown too to expose the policy dependence. "cross" = sustained-crossing step.
+FID = {
+    "diamond_greedy": {
+        "label": "DIAMOND (diffusion), greedy policy", "color": "#2563eb", "ls": "-",
+        "floor": 0.0020, "ceiling": 0.0075, "cross": 30, "ci": [30, 34],
+        "curve": [
+            0.002, 0.002, 0.0029, 0.003, 0.0034, 0.0034, 0.0036, 0.0036, 0.0037, 0.0037,
+            0.0037, 0.0038, 0.0038, 0.0039, 0.004, 0.004, 0.0041, 0.0041, 0.0041, 0.0041,
+            0.0042, 0.0043, 0.0043, 0.0044, 0.0044, 0.0044, 0.0044, 0.0044, 0.0044, 0.0051,
+            0.0051, 0.0051, 0.0052, 0.0052, 0.0051, 0.0051, 0.0053, 0.0049, 0.0049, 0.0049,
+            0.0049, 0.005, 0.005, 0.005, 0.005, 0.005, 0.005, 0.0051, 0.0051, 0.0051,
+            0.0051, 0.0051, 0.0051, 0.0051, 0.0052, 0.0052, 0.0052, 0.0052, 0.0052, 0.0052,
+        ],
+    },
+    "diamond_random": {
+        "label": "DIAMOND (diffusion), random policy", "color": "#2563eb", "ls": "--",
+        "floor": 0.0020, "ceiling": 0.0053, "cross": 10, "ci": [7, 14],
+        "curve": [
+            0.002, 0.002, 0.0029, 0.003, 0.0034, 0.0034, 0.0036, 0.0036, 0.0037, 0.0037,
+            0.0038, 0.0038, 0.0038, 0.0039, 0.0039, 0.0041, 0.0042, 0.0043, 0.0044, 0.0043,
+            0.0042, 0.0051, 0.0052, 0.0053, 0.0054, 0.0054, 0.0054, 0.0056, 0.0057, 0.0058,
+            0.0057, 0.0058, 0.0058, 0.0059, 0.0058, 0.0058, 0.0059, 0.006, 0.0061, 0.0062,
+            0.0063, 0.0065, 0.0065, 0.0065, 0.0064, 0.0065, 0.0065, 0.0065, 0.0065, 0.0066,
+            0.0066, 0.0069, 0.0067, 0.0068, 0.0068, 0.0068, 0.007, 0.0069, 0.0069, 0.0069,
+        ],
+    },
+    "iris_random": {
+        "label": "IRIS (transformer), random policy", "color": "#dc2626", "ls": "-",
+        "floor": 0.0005, "ceiling": 0.0026, "cross": 58, "ci": [21, 60],
+        "curve": [
+            0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005,
+            0.0004, 0.0005, 0.0004, 0.0004, 0.0004, 0.0004, 0.0008, 0.0008, 0.0009, 0.0012,
+            0.0014, 0.0015, 0.0014, 0.0015, 0.0014, 0.0015, 0.0014, 0.0014, 0.0014, 0.0014,
+            0.0016, 0.0016, 0.0014, 0.0014, 0.0014, 0.0014, 0.0014, 0.0013, 0.0013, 0.0013,
+            0.0013, 0.0014, 0.0014, 0.0013, 0.0013, 0.0013, 0.0014, 0.0013, 0.0013, 0.0013,
+            0.0012, 0.0012, 0.0012, 0.0013, 0.0013, 0.0014, 0.0014, 0.0017, 0.0017, 0.0019,
+        ],
+    },
 }
 
 
-def load_fid(raw_name: str, fallback: dict) -> dict:
-    """Prefer a captured raw run log if present, else the inlined fallback."""
-    path = DATA / raw_name
-    if path.exists():
-        try:
-            return extract_json(path)
-        except ValueError:
-            pass
-    return fallback
+def _norm(curve, floor, ceiling):
+    span = max(ceiling - floor, 1e-9)
+    return [(v - floor) / span for v in curve]
 
 
 def fidelity_chart():
-    d = load_fid("diamond_fid_raw.txt", DIAMOND_FID)
-    i = load_fid("iris_fid_raw.txt", IRIS_FID)
-
-    def norm(curve, floor, ceiling):
-        span = max(ceiling - floor, 1e-9)
-        return [(v - floor) / span for v in curve]
-
-    dn = norm(d["divergence_curve"], d["one_step_error"], d["decorrelated_ceiling"])
-    ihn = norm(i["divergence_curve"], i["one_step_error"], i["decorrelated_ceiling"])
-    xd = list(range(1, len(dn) + 1))
-    xi = list(range(1, len(ihn) + 1))
-
-    fig, ax = plt.subplots(figsize=(7.2, 4.4))
-    ax.plot(xd, dn, color="#2563eb", lw=2, label=f"DIAMOND (diffusion) — half-decorr @ {d['half_decorrelation_step']}")
-    ax.plot(xi, ihn, color="#dc2626", lw=2, label=f"IRIS (transformer) — half-decorr @ {i['half_decorrelation_step']}")
-    ax.axhline(0.5, color="#6b7280", ls="--", lw=1)
-    ax.axvline(30, color="#9ca3af", ls=":", lw=1)
-    ax.text(31, 0.6, "~30 steps", color="#6b7280", fontsize=9)
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    for key in ["diamond_greedy", "diamond_random", "iris_random"]:
+        r = FID[key]
+        yn = _norm(r["curve"], r["floor"], r["ceiling"])
+        x = list(range(1, len(yn) + 1))
+        lab = f'{r["label"]} — half-decorr @ {r["cross"]} [{r["ci"][0]}-{r["ci"][1]}]'
+        ax.plot(x, yn, color=r["color"], ls=r["ls"], lw=2, label=lab)
+    ax.axhline(0.5, color="#6b7280", ls=":", lw=1)
+    ax.text(1.5, 0.54, "half-decorrelated", color="#6b7280", fontsize=8)
     ax.set_xlabel("free-running dream step")
-    ax.set_ylabel("divergence from reality\n(0 = 1-step error, 1 = decorrelated)")
-    ax.set_title("World-model fidelity horizon: ~30 steps across architecture + scale")
-    ax.set_ylim(-0.05, 1.15)
-    ax.legend(loc="upper left", fontsize=9, frameon=False)
+    ax.set_ylabel("divergence from reality\n(0 = 1-step error, 1 = each run's ceiling)")
+    ax.set_title("Fidelity horizon is policy- and model-dependent (not a universal ~30)")
+    ax.set_ylim(-0.15, 1.3)
+    ax.legend(loc="upper left", fontsize=8.5, frameon=False)
     ax.grid(alpha=0.2)
     fig.tight_layout()
     out = HERE / "fidelity_horizon.png"

@@ -33,6 +33,68 @@ hf_volume = modal.Volume.from_name("hf-cache", create_if_missing=True)
 GAME = "Breakout"
 
 
+def _fidelity_stats(all_div, ceil_diffs, n_boot=2000, seed=0):
+    """Floor/ceiling-normalized half-decorrelation step from per-trajectory
+    divergence curves (n_traj x horizon) + per-traj decorrelated-ceiling diffs.
+
+    The original "first step >= threshold" crossing is noise-sensitive when the
+    curve hovers near the threshold, so report it alongside a *sustained*
+    crossing (first step from which the curve stays above) and a 3-point smoothed
+    crossing, plus a bootstrap 68% CI over trajectories. boot_frac_never_crosses
+    = fraction of bootstrap resamples that never reach the threshold within the
+    window (high => the crossing is unreliable / the dream barely decorrelates).
+    """
+    import numpy as np
+
+    div = np.array(all_div, dtype=float)            # (n_traj, horizon)
+    ceil_arr = np.array(ceil_diffs, dtype=float)
+    n_traj, H = div.shape
+    mean_div = div.mean(0)
+    floor = float(mean_div[0])
+    ceiling = float(ceil_arr.mean())
+
+    def first_cross(curve, thr):
+        for k, v in enumerate(curve):
+            if v >= thr:
+                return k + 1
+        return None
+
+    def sustained_cross(curve, thr):
+        for k in range(len(curve)):
+            if all(curve[j] >= thr for j in range(k, len(curve))):
+                return k + 1
+        return None
+
+    thresh = floor + 0.5 * (ceiling - floor)
+    cross_first = first_cross(mean_div, thresh)
+    cross_sustained = sustained_cross(mean_div, thresh)
+    sm = np.convolve(mean_div, np.ones(3) / 3.0, mode="same")
+    cross_smoothed = first_cross(sm, thresh)
+
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        ix = rng.integers(0, n_traj, n_traj)
+        md = div[ix].mean(0)
+        fl, ce = float(md[0]), float(ceil_arr[ix].mean())
+        c = first_cross(md, fl + 0.5 * (ce - fl))
+        boots.append(c if c is not None else H + 1)  # "never crosses" -> beyond window
+    boots = np.array(boots, dtype=float)
+    ci_lo, ci_hi = int(np.percentile(boots, 16)), int(np.percentile(boots, 84))
+    frac_no_cross = round(float((boots > H).mean()), 3)
+
+    return {
+        "one_step_error": round(floor, 4),
+        "decorrelated_ceiling": round(ceiling, 4),
+        "half_decorrelation_step": cross_first,
+        "half_decorrelation_step_sustained": cross_sustained,
+        "half_decorrelation_step_smoothed": cross_smoothed,
+        "half_decorrelation_ci68": [ci_lo, ci_hi],
+        "boot_frac_never_crosses": frac_no_cross,
+        "divergence_curve": [round(float(v), 4) for v in mean_div],
+    }
+
+
 @app.cls(
     image=image,
     gpu="L40S",
@@ -309,13 +371,18 @@ class DreamEval:
     # Fidelity horizon: free-running dream vs real, same actions
     # -----------------------------------------------------------------------
     @modal.method()
-    def fidelity(self, n_traj: int = 8, horizon: int = 60):
+    def fidelity(self, n_traj: int = 8, horizon: int = 60, policy: str = "greedy"):
         """Seed the world model from a real trajectory's context, free-run it
         forward under the SAME actions as the real env, and measure normalized
         frame divergence vs dream step. References: the one-step error (floor),
         the natural consecutive-real-frame change, and the divergence between
         unrelated real frames (decorrelated ceiling). The fidelity horizon = the
         dream step at which divergence reaches halfway to the ceiling.
+
+        policy: "greedy" drives the real trajectory with the pretrained
+        actor-critic (in-distribution); "random" uses uniform-random actions to
+        match IRIS's app_iris.py::fidelity, so the DIAMOND vs IRIS horizon
+        comparison is apples-to-apples on action distribution.
         """
         import numpy as np
         import torch
@@ -332,16 +399,22 @@ class DreamEval:
         need = n_cond + horizon + 1
         for tr in range(n_traj):
             torch.manual_seed(500 + tr)
+            rng = np.random.default_rng(500 + tr)  # only used when policy="random"
             reset_out = self.test_env.reset()
             obs = reset_out[0] if isinstance(reset_out, (tuple, list)) else reset_out
             hx, cx = self._zeros_hidden()
             frames = [obs.detach().clone()]
             acts = []
             for t in range(need):
-                with torch.no_grad():
-                    o = ac.predict_act_value(obs, (hx, cx))
-                hx, cx = o.hx_cx
-                a = torch.ones(1, dtype=torch.long, device=dev) if t < 8 else o.logits_act.argmax(-1).long()
+                if policy == "random":
+                    a = (torch.ones(1, dtype=torch.long, device=dev) if t < 8
+                         else torch.tensor([int(rng.integers(0, self.num_actions))],
+                                           dtype=torch.long, device=dev))
+                else:  # greedy: advance the actor-critic LSTM every step, as before
+                    with torch.no_grad():
+                        o = ac.predict_act_value(obs, (hx, cx))
+                    hx, cx = o.hx_cx
+                    a = torch.ones(1, dtype=torch.long, device=dev) if t < 8 else o.logits_act.argmax(-1).long()
                 step_out = self.test_env.step(a)
                 obs = step_out[0]
                 frames.append(obs.detach().clone())
@@ -370,21 +443,13 @@ class DreamEval:
 
         if not all_div:
             return {"game": GAME, "error": "no full-length trajectories", "n_traj": n_traj}
-        div = np.array(all_div)
-        mean_div = div.mean(0)
-        floor = float(mean_div[0])
-        ceiling = float(np.mean(ceil_diffs))
-        real_step = float(np.mean(real_step_diffs))
-        thresh = floor + 0.5 * (ceiling - floor)
-        cross = next((k + 1 for k, v in enumerate(mean_div) if v >= thresh), None)
-        return {
-            "game": GAME, "n_traj_used": len(all_div), "horizon": horizon, "n_cond": n_cond,
-            "one_step_error": round(floor, 4),
-            "real_consecutive_frame_diff": round(real_step, 4),
-            "decorrelated_ceiling": round(ceiling, 4),
-            "half_decorrelation_step": cross,
-            "divergence_curve": [round(float(v), 4) for v in mean_div],
-        }
+        stats = _fidelity_stats(all_div, ceil_diffs)
+        stats.update({
+            "game": GAME, "model": "DIAMOND", "policy": policy,
+            "n_traj_used": len(all_div), "horizon": horizon, "n_cond": n_cond,
+            "real_consecutive_frame_diff": round(float(np.mean(real_step_diffs)), 4),
+        })
+        return stats
 
 
 @app.local_entrypoint()
@@ -403,9 +468,17 @@ def run_eval(n_real: int = 5, n_imag: int = 8, real_horizon: int = 400, imag_hor
 
 
 @app.local_entrypoint()
-def fidelity(n_traj: int = 8, horizon: int = 60):
+def fidelity(n_traj: int = 8, horizon: int = 60, policy: str = "both"):
     import json
-    print(json.dumps(DreamEval().fidelity.remote(n_traj=n_traj, horizon=horizon), indent=2))
+    wm = DreamEval()
+    if policy == "both":
+        out = {
+            "greedy": wm.fidelity.remote(n_traj=n_traj, horizon=horizon, policy="greedy"),
+            "random": wm.fidelity.remote(n_traj=n_traj, horizon=horizon, policy="random"),
+        }
+    else:
+        out = wm.fidelity.remote(n_traj=n_traj, horizon=horizon, policy=policy)
+    print(json.dumps(out, indent=2))
 
 
 @app.local_entrypoint()
