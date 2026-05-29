@@ -4,7 +4,27 @@ Experiments on an open generative **world model** (DIAMOND — a diffusion world
 model that generates a playable Atari environment frame by frame), run headless
 on Modal. Sibling to [`inside-the-agent`](../inside-the-agent).
 
-Two studies share the same DIAMOND-on-Modal infrastructure:
+## The unifying result: a ~30-step fidelity horizon
+
+Free-running the dream from a real trajectory's context under the same actions
+as the real env, frame divergence shows: the **one-step prediction error is
+0.0020** (≈ the natural consecutive-frame change of 0.0022 — near-perfect), but
+free-running drifts to **half-decorrelated by ~30 steps** (decorrelated ceiling
+0.0075). That one number explains everything below:
+
+- **Decode works** (state R²=0.89): instantaneous state needs only one faithful
+  frame, and 1-step fidelity is excellent.
+- **Steering and multi-step policy evaluation fail**: both need *sustained*
+  fidelity, but the dream half-decorrelates by ~30 steps (and DreamEval's
+  imagined reward saturates by ~20–30 steps — the same horizon).
+
+**A small open world model decodes instantaneous state well but its ~30-step
+fidelity horizon bounds which use-cases work.** Code: `app_eval.py::fidelity`.
+
+---
+
+Two studies share the same DIAMOND-on-Modal infrastructure, both explained by
+the fidelity horizon above:
 
 ### 1. DreamEval — world model as a cheap policy evaluator (current)
 

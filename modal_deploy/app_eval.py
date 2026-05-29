@@ -305,6 +305,87 @@ class DreamEval:
             "best_horizon": best,
         }
 
+    # -----------------------------------------------------------------------
+    # Fidelity horizon: free-running dream vs real, same actions
+    # -----------------------------------------------------------------------
+    @modal.method()
+    def fidelity(self, n_traj: int = 8, horizon: int = 60):
+        """Seed the world model from a real trajectory's context, free-run it
+        forward under the SAME actions as the real env, and measure normalized
+        frame divergence vs dream step. References: the one-step error (floor),
+        the natural consecutive-real-frame change, and the divergence between
+        unrelated real frames (decorrelated ceiling). The fidelity horizon = the
+        dream step at which divergence reaches halfway to the ceiling.
+        """
+        import numpy as np
+        import torch
+
+        n_cond = int(self.cfg.agent.denoiser.inner_model.num_steps_conditioning)
+        wm = self.wm_env
+        ac = self.agent.actor_critic
+        dev = self.device
+
+        def l1(a, b):
+            return float((a - b).abs().mean().item())
+
+        all_div, real_step_diffs, ceil_diffs = [], [], []
+        need = n_cond + horizon + 1
+        for tr in range(n_traj):
+            torch.manual_seed(500 + tr)
+            reset_out = self.test_env.reset()
+            obs = reset_out[0] if isinstance(reset_out, (tuple, list)) else reset_out
+            hx, cx = self._zeros_hidden()
+            frames = [obs.detach().clone()]
+            acts = []
+            for t in range(need):
+                with torch.no_grad():
+                    o = ac.predict_act_value(obs, (hx, cx))
+                hx, cx = o.hx_cx
+                a = torch.ones(1, dtype=torch.long, device=dev) if t < 8 else o.logits_act.argmax(-1).long()
+                step_out = self.test_env.step(a)
+                obs = step_out[0]
+                frames.append(obs.detach().clone())
+                acts.append(a)
+                if self._done(step_out[2], step_out[3]):
+                    break
+            if len(frames) < need:
+                continue  # episode ended early; skip for a clean fixed-length compare
+
+            # seed the dream from the real context, then free-run
+            wm.obs_buffer = torch.stack(frames[0:n_cond], dim=1).to(dev)
+            wm.act_buffer = torch.stack(acts[0:n_cond], dim=1).to(dev)
+            divs = []
+            for k in range(horizon):
+                t = n_cond + k                      # predicting real frame index t
+                wm.act_buffer[:, -1] = acts[t - 1]
+                imagined, _ = wm.predict_next_obs()
+                wm.obs_buffer = wm.obs_buffer.roll(-1, dims=1)
+                wm.act_buffer = wm.act_buffer.roll(-1, dims=1)
+                wm.obs_buffer[:, -1] = imagined
+                divs.append(l1(imagined.squeeze(0), frames[t].squeeze(0)))
+            all_div.append(divs)
+            for t in range(1, n_cond + horizon):
+                real_step_diffs.append(l1(frames[t].squeeze(0), frames[t - 1].squeeze(0)))
+            ceil_diffs.append(l1(frames[n_cond].squeeze(0), frames[n_cond + horizon].squeeze(0)))
+
+        if not all_div:
+            return {"game": GAME, "error": "no full-length trajectories", "n_traj": n_traj}
+        div = np.array(all_div)
+        mean_div = div.mean(0)
+        floor = float(mean_div[0])
+        ceiling = float(np.mean(ceil_diffs))
+        real_step = float(np.mean(real_step_diffs))
+        thresh = floor + 0.5 * (ceiling - floor)
+        cross = next((k + 1 for k, v in enumerate(mean_div) if v >= thresh), None)
+        return {
+            "game": GAME, "n_traj_used": len(all_div), "horizon": horizon, "n_cond": n_cond,
+            "one_step_error": round(floor, 4),
+            "real_consecutive_frame_diff": round(real_step, 4),
+            "decorrelated_ceiling": round(ceiling, 4),
+            "half_decorrelation_step": cross,
+            "divergence_curve": [round(float(v), 4) for v in mean_div],
+        }
+
 
 @app.local_entrypoint()
 def smoke(horizon: int = 80):
@@ -319,6 +400,12 @@ def run_eval(n_real: int = 5, n_imag: int = 8, real_horizon: int = 400, imag_hor
         n_real=n_real, n_imag=n_imag, real_horizon=real_horizon, imag_horizon=imag_horizon
     )
     print(json.dumps(info, indent=2))
+
+
+@app.local_entrypoint()
+def fidelity(n_traj: int = 8, horizon: int = 60):
+    import json
+    print(json.dumps(DreamEval().fidelity.remote(n_traj=n_traj, horizon=horizon), indent=2))
 
 
 @app.local_entrypoint()

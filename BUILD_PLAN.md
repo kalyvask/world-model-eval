@@ -54,6 +54,12 @@ testbed** — real rollouts are cheap here, so we use them as ground truth. We d
 - Consolidated: a small world model **decodes** state (R²=0.89, steering study)
   but does not faithfully **simulate** — neither clean steering nor reliable
   policy eval holds. Decode ≫ simulate.
+- **Capstone — fidelity horizon** (`app_eval.py::fidelity`): free-running the
+  dream from a real context under the same actions, one-step error = 0.0020
+  (≈ natural frame change 0.0022, near-perfect) but **half-decorrelated by
+  ~30 steps** (ceiling 0.0075). This ~30-step horizon is the mechanism: it's
+  long enough for one-frame decode, too short for sustained simulation — which
+  is exactly why steering and multi-step eval fail.
 - **E4 — writeup + chart.**
 
 ## Honesty guardrails
