@@ -112,11 +112,15 @@ it. See [`docs/steering_study.md`](docs/steering_study.md).
 These results are about *observation-prediction* world models used *out of the
 box*; the literature qualifies them in two ways.
 
-- **The drift is partly trainable away.** GameNGen keeps a diffusion DOOM model
-  coherent for minutes by adding noise to its context frames during training, so
-  it learns to correct its own errors. DIAMOND and IRIS (Atari-100k, frozen) have
-  no such mitigation, so the short horizon here is a property of these
-  checkpoints, not of world models in general.
+- **The drift is partly trainable away, and we don't train.** This repo
+  *evaluates open, pretrained world models off the shelf* (DIAMOND and IRIS,
+  downloaded frozen); it never trains or fine-tunes one. GameNGen's minutes-long
+  coherence comes from a bespoke *training* recipe (Gaussian noise added to the
+  context frames so the model learns to correct its own drift) that the open
+  Atari-100k checkpoints were simply not trained with. So the short horizon we
+  measure is a property of these frozen open checkpoints, not of world models in
+  general; closing it would mean training a model from scratch with that
+  mitigation, which is out of scope for an evaluation of what's already public.
 - **Planning need not go through observations.** DreamerV3 trains policies in a
   compact latent space over short horizons with a value function for what's
   beyond the horizon; MuZero plans with a *value-equivalent* model that never
