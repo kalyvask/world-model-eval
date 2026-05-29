@@ -71,10 +71,19 @@ richer world (Oasis-Minecraft) the paper didn't cover.
   activation, ball_x R²=0.89 / ball_y R²=0.76 (held-out). Driving imagination
   with the agent's policy + FIRE burn-in was needed for dynamic rollouts;
   frame-diff CV isolates the moving ball from static bricks.
-- P4 ✅ (characterized) **decode ≫ steer**: adding the probe / diff-of-means
-  direction moves the ball, but a matched-norm random direction moves it about
-  as much; weak sign-dependent control at moderate α, non-monotonic past it.
-  Clean linear steering of the world model is not established.
+- P4 ✅ **decode ≫ steer (bug-checked, holds)**: the first pass added the
+  direction to the UNet output, but `InnerModel.forward` runs `norm_out`
+  (GroupNorm) on the next line — it subtracts the per-group mean and rescales,
+  washing an additive offset away. Fixed by injecting on `norm_out`'s **output**
+  (post-GroupNorm), with the perturbation scaled to a fraction of the activation
+  norm per denoise step. Re-run (signed frac sweep + matched-norm random
+  control): the finding **survives the fix**. The semantic ball_x direction does
+  not move the measured ball more than a random direction of the same norm —
+  random frac=0.25 shifted ball_x by −20.6 px vs the semantic direction's
+  −6.4 px, and +frac barely moved it. So decode ≫ steer is real, not an artifact
+  of the original (pre-norm) hook placement. Caveat: at magnitudes large enough
+  to change the output the frame degrades, so this is evidence against *clean*
+  steerability, not a precise causal null. Code: `app_diamond.py::steer_ball`.
 - P5 / P6: optional given the P4 finding (a "steer the dream" cockpit is only
   compelling if steering is clean; Oasis port would test if decode≫steer holds
   on a richer model).
