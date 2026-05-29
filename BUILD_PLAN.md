@@ -43,13 +43,17 @@ testbed** — real rollouts are cheap here, so we use them as ground truth. We d
 - **E1 — load + both return functions** ✅ (`app_eval.py`): pipeline runs;
   real env ranks correctly (good 2.0 > random 0.0). FIRE burn-in launches the
   ball in both real and dream.
-- **E2 — the experiment** ✅: epsilon spectrum (0→1). Real return falls
-  monotonically 8.8→1.4; imagined return ranks it at **Spearman 0.78 (p=0.04),
-  Pearson 0.81** (n=7; 16 imagined rollouts × H=120 vs 5 real × 300). Signal is
-  in the ranking, not magnitude (sparse reward compresses imagined returns).
-- **E3 — strengthen + horizon/cost:** more rollouts + longer H for a tighter
-  correlation and a clean scatter; correlation vs imagined H (fidelity decay);
-  step-count/wall-clock of imagined vs real eval.
+- **E2 — the experiment** ✅: 7 coarse policies → Spearman 0.78 (p=0.04). Looked
+  promising, but see E3.
+- **E3 — strengthen** ✅ (and it reversed the result): more rollouts (n_imag=32)
+  gave 0.71 (p=0.07); a **13-policy grid collapsed it to Spearman 0.22 (p=0.47)**.
+  Imagined return is flat ~0.4 across the spectrum (random ≈ good); the dream's
+  reward **saturates by ~20–30 steps** (flat horizon curve). **Honest verdict:
+  imagined return is NOT a reliable policy evaluator on DIAMOND-Breakout** — the
+  n=7 positive was small-n / good-vs-random-extremes fragility.
+- Consolidated: a small world model **decodes** state (R²=0.89, steering study)
+  but does not faithfully **simulate** — neither clean steering nor reliable
+  policy eval holds. Decode ≫ simulate.
 - **E4 — writeup + chart.**
 
 ## Honesty guardrails

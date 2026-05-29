@@ -217,6 +217,94 @@ class DreamEval:
             "pearson": round(float(pe.statistic), 3),
         }
 
+    # -----------------------------------------------------------------------
+    # E3: strengthened correlation + correlation-vs-horizon curve
+    # -----------------------------------------------------------------------
+    def _rollout_cumreward(self, env, epsilon, horizon, seed, fire_burn_in=8):
+        """Like _rollout_return but returns the cumulative-reward trajectory
+        (list, one entry per executed step) so we can read the return at any
+        horizon checkpoint from a single rollout."""
+        import random
+
+        import torch
+
+        rng = random.Random(seed)
+        torch.manual_seed(seed)
+        reset_out = env.reset()
+        obs = reset_out[0] if isinstance(reset_out, (tuple, list)) else reset_out
+        hx, cx = self._zeros_hidden()
+        total = 0.0
+        cum = []
+        for t in range(horizon):
+            with torch.no_grad():
+                o = self.agent.actor_critic.predict_act_value(obs, (hx, cx))
+            hx, cx = o.hx_cx
+            if t < fire_burn_in:
+                a = torch.ones(1, dtype=torch.long, device=self.device)
+            else:
+                a = self._eps_action(o.logits_act, epsilon, rng)
+            step_out = env.step(a)
+            obs, rew, term, trunc = step_out[0], step_out[1], step_out[2], step_out[3]
+            total += self._scalar(rew)
+            cum.append(total)
+            if self._done(term, trunc):
+                break
+        return cum
+
+    def _imagined_curve(self, epsilon, n_roll, horizon, checkpoints):
+        """Mean imagined cumulative return at each horizon checkpoint."""
+        import numpy as np
+        cps = sorted(checkpoints)
+        per_cp = {h: [] for h in cps}
+        for r in range(n_roll):
+            cum = self._rollout_cumreward(self.wm_env, epsilon, horizon, seed=2000 + r)
+            for h in cps:
+                per_cp[h].append(cum[min(h, len(cum)) - 1] if cum else 0.0)
+        return {h: float(np.mean(per_cp[h])) for h in cps}
+
+    @modal.method()
+    def run_eval_curve(self, epsilons: list = None, n_real: int = 10, real_horizon: int = 300,
+                       n_imag: int = 32, imag_horizon: int = 150, checkpoints: list = None):
+        import numpy as np
+        from scipy.stats import pearsonr, spearmanr
+
+        if epsilons is None:
+            epsilons = [0.0, 0.1, 0.25, 0.4, 0.6, 0.8, 1.0]
+        if checkpoints is None:
+            checkpoints = [30, 60, 90, 120, 150]
+        checkpoints = [h for h in sorted(checkpoints) if h <= imag_horizon]
+
+        real_returns, rows = [], []
+        imag_at = {h: [] for h in checkpoints}
+        for eps in epsilons:
+            rr, _ = self._real_return(eps, n_real, real_horizon)
+            real_returns.append(rr)
+            cum = self._imagined_curve(eps, n_imag, imag_horizon, checkpoints)
+            for h in checkpoints:
+                imag_at[h].append(cum[h])
+            rows.append({"epsilon": eps, "real_return": round(rr, 3),
+                         "imagined_at": {h: round(cum[h], 3) for h in checkpoints}})
+
+        curve = []
+        for h in checkpoints:
+            sp = spearmanr(real_returns, imag_at[h])
+            pe = pearsonr(real_returns, imag_at[h])
+            curve.append({"horizon": h,
+                          "spearman": round(float(sp.correlation), 3),
+                          "spearman_p": round(float(sp.pvalue), 4),
+                          "pearson": round(float(pe.statistic), 3)})
+        best = max(curve, key=lambda c: (c["spearman"] if c["spearman"] == c["spearman"] else -9))
+        return {
+            "game": GAME, "epsilons": epsilons,
+            "n_real": n_real, "real_horizon": real_horizon,
+            "n_imag": n_imag, "imag_horizon": imag_horizon,
+            "real_returns": [round(r, 3) for r in real_returns],
+            "imagined_at_best_horizon": [round(v, 3) for v in imag_at[best["horizon"]]],
+            "rows": rows,
+            "horizon_curve": curve,
+            "best_horizon": best,
+        }
+
 
 @app.local_entrypoint()
 def smoke(horizon: int = 80):
@@ -229,5 +317,19 @@ def run_eval(n_real: int = 5, n_imag: int = 8, real_horizon: int = 400, imag_hor
     import json
     info = DreamEval().run_eval.remote(
         n_real=n_real, n_imag=n_imag, real_horizon=real_horizon, imag_horizon=imag_horizon
+    )
+    print(json.dumps(info, indent=2))
+
+
+@app.local_entrypoint()
+def run_eval_curve(n_real: int = 10, real_horizon: int = 300, n_imag: int = 32, imag_horizon: int = 150,
+                   n_eps: int = 7):
+    import json
+    # Denser epsilon grid (more policies) tightens the n-limited Spearman.
+    epsilons = [round(i / (n_eps - 1), 3) for i in range(n_eps)] if n_eps > 1 else [0.0]
+    checkpoints = sorted({max(10, imag_horizon // 3), max(10, 2 * imag_horizon // 3), imag_horizon})
+    info = DreamEval().run_eval_curve.remote(
+        epsilons=epsilons, n_real=n_real, real_horizon=real_horizon,
+        n_imag=n_imag, imag_horizon=imag_horizon, checkpoints=checkpoints,
     )
     print(json.dumps(info, indent=2))
