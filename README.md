@@ -17,9 +17,12 @@ Breakout, run headless on Modal. Sibling to [`inside-the-agent`](../inside-the-a
   **~16–20 steps**. DIAMOND (16) and IRIS (20) land close in comparable units, so
   the off-policy cliff is roughly architecture-independent at this scale.
 - **So use them accordingly.** A small world model is a good tool for **state
-  estimation and short-horizon, on-policy rollout**, and a poor one for **policy
-  ranking or long-horizon / off-policy planning**. The ball-drift metric here
-  locates that cliff for any new model.
+  estimation and short-horizon, on-policy rollout**, and a poor one for **ranking
+  policies from raw imagined return, or planning far ahead by free-running
+  pixels**. The ball-drift metric here locates that cliff for any new model.
+  (Production methods like DreamerV3 engineer around this cliff with a compact
+  latent space, short horizons, and a value function; see *Relation to prior
+  world-model work* below.)
 - **Two downstream failures, one root cause.** Imagined return does **not** rank
   policies (Spearman ≈ 0), and the decoded state direction does **not** steer the
   ball (decode ≫ steer). Both sit past the fidelity cliff.
@@ -81,6 +84,14 @@ ball by ~16–20 steps (above) and imagined reward saturates by ~step 50, so a g
 policy's real edge — sustained play over hundreds of steps — accrues *past* the
 fidelity cliff, where the dream can't see it.
 
+**Scope of this claim.** This sums the reward model's *raw* per-step reward over
+a fixed horizon — the naive way to use a world model as an evaluator. It does
+**not** use a value function to credit reward beyond the horizon the way
+DreamerV3 does, so the honest statement is that *raw imagined return* fails to
+rank these policies, not that no world-model signal can. `run_eval_value` tests a
+value-bootstrapped variant directly (raw, discounted, value-bootstrapped, and
+mean-critic-value signals vs real return).
+
 ![Imagined vs real return across the 13-policy spectrum; imagined return is flat](artifacts/dreameval_scatter.png)
 
 *Real return spans 1.7–8.9 across the epsilon spectrum (color); imagined return
@@ -95,6 +106,23 @@ adding that decoded ball direction back does **not** move the ball more than a
 matched-norm *random* direction does — bug-checked, it holds even when injected
 post-normalization. Decoding a state is not the same as having a causal handle on
 it. See [`docs/steering_study.md`](docs/steering_study.md).
+
+## Relation to prior world-model work
+
+These results are about *observation-prediction* world models used *out of the
+box*; the literature qualifies them in two ways.
+
+- **The drift is partly trainable away.** GameNGen keeps a diffusion DOOM model
+  coherent for minutes by adding noise to its context frames during training, so
+  it learns to correct its own errors. DIAMOND and IRIS (Atari-100k, frozen) have
+  no such mitigation, so the short horizon here is a property of these
+  checkpoints, not of world models in general.
+- **Planning need not go through observations.** DreamerV3 trains policies in a
+  compact latent space over short horizons with a value function for what's
+  beyond the horizon; MuZero plans with a *value-equivalent* model that never
+  reconstructs frames at all. Our negative is specific to observation models
+  scored by raw imagined reward, and is consistent with recent findings that even
+  value-equivalent models struggle to rank unseen policies.
 
 ## Scope
 
@@ -114,4 +142,5 @@ the agent's policy). Tiny 4.4M-param DIAMOND denoiser; cheap to run.
 Status: decode ≫ simulate, bug-checked end to end. Decode R²≈0.78 (ground-truth,
 leakage-free); fidelity measured in both L1 and a frame-type-fair ball-drift
 metric (on-policy tracks ~60 steps; off-policy cliff ~16–20, similar across
-DIAMOND and IRIS); imagined return does not rank policies (Spearman ≈ 0).
+DIAMOND and IRIS); raw imagined return does not rank policies (Spearman ≈ 0; a
+value-bootstrapped variant via `run_eval_value` is the open test).

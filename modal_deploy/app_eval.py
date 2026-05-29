@@ -392,6 +392,82 @@ class DreamEval:
             "best_horizon": best,
         }
 
+    @modal.method()
+    def run_eval_value(self, epsilons: list = None, n_real: int = 10, real_horizon: int = 300,
+                       n_imag: int = 16, horizon: int = 20, gamma: float = 0.99):
+        """Value-function DreamEval (the Dreamer-style fix). Raw imagined return
+        sums the reward model's per-step reward over a fixed horizon and ignores
+        everything beyond it -- DreamerV3 instead bootstraps with a value function.
+        For each policy this computes four imagined signals over a SHORT horizon
+        (inside the fidelity window): raw return, discounted return, a
+        value-bootstrapped return (sum_t g^t r_t + g^H V(s_H)), and the mean
+        critic value over visited states, then correlates each with real return.
+        If a value signal ranks (Spearman high) where raw return did not, the null
+        was about the metric; if all stay flat, it was the model. Caveat: V is the
+        pretrained greedy critic, not a per-eval-policy value, so the bootstrap is
+        an approximation.
+        """
+        import random
+
+        import numpy as np
+        import torch
+        from scipy.stats import spearmanr
+
+        if epsilons is None:
+            epsilons = [round(i / 12, 3) for i in range(13)]
+        ac, dev = self.agent.actor_critic, self.device
+
+        def imagined_signals(epsilon, seed):
+            rng = random.Random(seed); torch.manual_seed(seed)
+            reset_out = self.wm_env.reset()
+            obs = reset_out[0] if isinstance(reset_out, (tuple, list)) else reset_out
+            hx, cx = self._zeros_hidden()
+            raw, disc, g, vals = 0.0, 0.0, 1.0, []
+            for t in range(horizon):
+                with torch.no_grad():
+                    o = ac.predict_act_value(obs, (hx, cx))
+                hx, cx = o.hx_cx
+                vals.append(float(o.val.reshape(-1)[0].item()))
+                a = torch.ones(1, dtype=torch.long, device=dev) if t < 8 else self._eps_action(o.logits_act, epsilon, rng)
+                step_out = self.wm_env.step(a)
+                obs, rew = step_out[0], step_out[1]
+                r = self._scalar(rew)
+                raw += r; disc += g * r; g *= gamma
+                if self._done(step_out[2], step_out[3]):
+                    break
+            with torch.no_grad():
+                v_final = float(ac.predict_act_value(obs, (hx, cx)).val.reshape(-1)[0].item())
+            boot = disc + g * v_final
+            return raw, disc, boot, (float(np.mean(vals)) if vals else 0.0)
+
+        reals, raws, discs, boots, meanvals = [], [], [], [], []
+        for eps in epsilons:
+            rr, _ = self._real_return(eps, n_real, real_horizon)
+            reals.append(rr)
+            sigs = [imagined_signals(eps, 4000 + s) for s in range(n_imag)]
+            raws.append(float(np.mean([s[0] for s in sigs])))
+            discs.append(float(np.mean([s[1] for s in sigs])))
+            boots.append(float(np.mean([s[2] for s in sigs])))
+            meanvals.append(float(np.mean([s[3] for s in sigs])))
+
+        def sp(x):
+            r = spearmanr(reals, x)
+            return {"spearman": round(float(r.correlation), 3), "p": round(float(r.pvalue), 4)}
+
+        return {
+            "game": GAME, "method": "value_bootstrapped_dreameval",
+            "n_real": n_real, "n_imag": n_imag, "horizon": horizon, "gamma": gamma,
+            "epsilons": epsilons,
+            "real_returns": [round(r, 2) for r in reals],
+            "raw_imagined_return": [round(r, 3) for r in raws],
+            "value_bootstrapped_return": [round(r, 3) for r in boots],
+            "mean_critic_value": [round(r, 3) for r in meanvals],
+            "spearman_raw": sp(raws),
+            "spearman_discounted": sp(discs),
+            "spearman_value_bootstrap": sp(boots),
+            "spearman_mean_value": sp(meanvals),
+        }
+
     # -----------------------------------------------------------------------
     # Fidelity horizon: free-running dream vs real, same actions
     # -----------------------------------------------------------------------
@@ -627,6 +703,17 @@ def fidelity_ball(n_traj: int = 24, horizon: int = 60, policy: str = "both"):
     else:
         out = wm.fidelity_ball.remote(n_traj=n_traj, horizon=horizon, policy=policy)
     print(json.dumps(out, indent=2))
+
+
+@app.local_entrypoint()
+def run_eval_value(n_real: int = 10, real_horizon: int = 300, n_imag: int = 16, horizon: int = 20,
+                   n_eps: int = 13):
+    import json
+    epsilons = [round(i / (n_eps - 1), 3) for i in range(n_eps)] if n_eps > 1 else [0.0]
+    info = DreamEval().run_eval_value.remote(
+        epsilons=epsilons, n_real=n_real, real_horizon=real_horizon, n_imag=n_imag, horizon=horizon
+    )
+    print(json.dumps(info, indent=2))
 
 
 @app.local_entrypoint()
