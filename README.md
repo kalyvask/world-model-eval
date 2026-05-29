@@ -32,6 +32,13 @@ diffusion vs autoregressive-transformer and a meaningful scale step. Code:
 `app_iris.py::fidelity`. (Caveat: both are small/medium Atari models; a
 frontier-scale test would need closed models like Genie.)
 
+![World-model fidelity horizon: DIAMOND and IRIS both half-decorrelate at ~30 steps](artifacts/fidelity_horizon.png)
+
+*Each curve is normalized to its own floor-to-ceiling (0 = one-step error,
+1 = decorrelated), so the absolute scale difference between the two models is
+removed and only the horizon is compared. DIAMOND (diffusion) crosses half-
+decorrelation at step 30, IRIS (transformer, several times larger) at step 31.*
+
 ---
 
 Two studies share the same DIAMOND-on-Modal infrastructure, both explained by
@@ -55,6 +62,12 @@ grid it collapses to Spearman 0.22 (p=0.47)**. The dream's imagined reward
 **saturates by ~20–30 steps** (the rollout goes inert after the ball is lost),
 so it captures only the coarsest good-vs-random distinction, not a usable
 ranking.
+
+![Imagined vs real return across the 13-policy spectrum; imagined return is flat](artifacts/dreameval_scatter.png)
+
+*Real return falls cleanly from 8.6 to 1.1 across the epsilon spectrum (color),
+but imagined return stays flat at ~0.4 regardless of policy quality. Spearman
+0.22 (p=0.47) at 13 policies: no usable ranking signal.*
 
 Takeaway: a small open world model decodes state well but its imagined rollouts
 are too low-fidelity to rank policies at fine resolution. Combined with the
