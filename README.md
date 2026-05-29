@@ -93,9 +93,10 @@ states. **The value fix does not rescue ranking here** — all four stay flat
 (Spearman −0.10 raw, −0.10 value-bootstrap, +0.24 mean-critic-value, all p≫0.4),
 because the critic saturates to ~2.0 on imagined states regardless of policy
 quality. So the null is not just a raw-reward artifact; it survives the
-Dreamer-style fix. The one untested gap is a *co-trained* critic (true Dreamer
-trains the value head inside imagination); with the public checkpoint's critic,
-the value signal doesn't help.
+Dreamer-style fix. And a critic can't fix it: it only *bootstraps* the imagined
+reward, which is flat, so the real gap is a better-trained world model (Dreamer
+co-trains model + critic + policy on real data), not a post-hoc value head. That
+needs training, so it is out of scope for evaluating frozen public checkpoints.
 
 ![Imagined vs real return across the 13-policy spectrum; imagined return is flat](artifacts/dreameval_scatter.png)
 
@@ -130,10 +131,14 @@ box*; the literature qualifies them in two ways.
   compact latent space over short horizons with a value function for what's
   beyond the horizon; MuZero plans with a *value-equivalent* model that never
   reconstructs frames at all. We tested the value idea with DIAMOND's own critic
-  (a value-bootstrapped return; see DreamEval) and it still didn't rank, so our
-  negative covers more than raw reward; the untested gap is a *co-trained* critic.
-  It's consistent with recent findings that even value-equivalent models struggle
-  to rank unseen policies.
+  (a value-bootstrapped return; see DreamEval) and it still didn't rank — because
+  a critic only *bootstraps* the imagined reward, and that reward is flat across
+  policies, so no post-hoc value head recovers a ranking signal the frozen dream
+  doesn't contain. The real gap is therefore a better-trained world model
+  (DreamerV3 co-trains model + critic + policy on real data so the dream stays
+  accurate for the policy it's evaluating), which is training, not frozen-
+  checkpoint evaluation. Consistent with recent findings that even
+  value-equivalent models struggle on unseen policies.
 
 ## Scope
 
@@ -155,5 +160,6 @@ leakage-free); fidelity measured in both L1 and a frame-type-fair ball-drift
 metric (on-policy tracks ~60 steps; off-policy cliff ~16–20, similar across
 DIAMOND and IRIS); raw imagined return does not rank policies (Spearman ≈ 0), and
 a value-bootstrapped variant using DIAMOND's own critic does not rescue it
-(Spearman −0.10 to +0.24, all p≫0.4). A co-trained Dreamer-style critic is the
-remaining untested gap.
+(Spearman −0.10 to +0.24, all p≫0.4) — a critic only bootstraps the flat
+imagined reward. The real gap is a better-trained / co-trained world model
+(training), not a post-hoc critic, so it is out of scope here.
